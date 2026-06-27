@@ -1,10 +1,42 @@
 # @boldblackai/create-bclaw
 
-Scaffold a renamed **Hermes Agent claw** — a long-running Slack socket-mode
-gateway deployed on AWS ECS Fargate. Given a name, this CLI produces a working
-claw repo with every `bclaw` reference (file contents **and** file/directory
-names, including the SSM namespace, IAM scopes, and KMS alias) renamed to that
-name, so multiple claws can coexist in one AWS account.
+Create a repository for your own bclaw, deployed to your own AWS account.
+
+## What is a bclaw?
+
+bclaw is short for "**B**usinessClaw": an opinionated deployment of [hermes-agent](https://hermes-agent.nousresearch.com/) configured as a 
+long-running ["claw"](https://www.cnet.com/tech/services-and-software/claw-ai-explainer-openclaw-nvidia/) within your Slack workspace.
+
+Create, customize and deploy as many as you'd like. Each generated bclaw repository corresponds to one specific long-running agent and Slack application/user.
+
+For example, you could generate a `@swe-pal` for a "Devin" type experience: code reviews, pull requests, etc. Or, a `@reportclaw` that posts reports at scheduled times to configured channels.
+
+## How it works
+
+1. Generate your bclaw repository
+
+    npx @boldblackai/create-bclaw swe-pal
+
+2. Follow the instructions in the README to create the IAM user and policy to get the `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` for `.env`. This also
+walks you through creating and installing the Slack app into your workspace to get the `SLACK_APP_TOKEN` and `SLACK_BOT_TOKEN` you'll need later.
+
+3. The generated repository is a set of skills, so open up `swe-pal` in your favorite harness ([Pi](https://boldblackai.github.io/harness/agents/pi/), [Hermes](https://boldblackai.github.io/harness/agents/hermes/), [OpenCode](https://boldblackai.github.io/harness/agents/opencode/))
+
+4. Run the `/setup-harness-ecs-fargate` skill. This will prompt you for an inference provider, it supports [OpenRouter](https://openrouter.ai/), [ZAI](https://z.ai/subscribe), and [Anthropic](https://www.anthropic.com/) out of the box, but trivial 
+to use any that [hermes-agent already supports](https://hermes-agent.nousresearch.com/docs/integrations/providers/).
+
+5. To manage it (update running image version, update skills/SOUL.md, etc) you can use the `/manage-harness-ecs-fargate` skill.
+
+6. To uninstall it, run the `/teardown-harness-ecs-fargate` skill.
+
+## What you get
+
+* [hermes-agent](https://hermes-agent.nousresearch.com/docs) running on ECS Fargate via our [hardened](https://boldblackai.github.io/harness/security/) [harness](https://github.com/boldblackai/harness) Docker image.
+
+* GitHub & Slack integration
+
+* Persisted and backed up via AWS EFS.
+
 
 ## Usage
 
@@ -28,46 +60,8 @@ ECS cluster/service, log group, SSM namespace (`/<name>/`), KMS alias
 - `--version`, `-V` — print the version.
 - `--help`, `-h` — show help.
 
-### What you get
-
-`./<name>/` — a renamed snapshot of the bundled `template/` (a Hermes Agent claw
-on ECS Fargate), with an initial git commit already made. Then:
-
-```bash
-cd <name>
-mise install && mise trust
-# follow README.md → Setup (IAM user, deploy policy, .env, Slack app, secrets)
-# run the setup-harness-ecs-fargate skill to deploy
-```
-
-The generator is **scaffold-only**: it produces the renamed directory and stops.
-It does not run the setup/teardown skills, touch AWS or Slack, prompt for
-tokens, or run `mise install` — those belong to the bundled skills' setup flow.
-
-## How the rename works
-
-The bundled `template/` is the source of truth — a Hermes Agent claw on ECS
-Fargate, shipped inside the package. At runtime the CLI copies `template/` → `./<name>/`
-and applies a single literal replace — lowercase `bclaw` → `<name>` — to text
-file contents and path components. Every `bclaw` in the source is lowercase and
-standalone, so a literal substring replace is the whole transform and is
-verified by a hard post-copy assertion (zero residual `bclaw`).
-
-One wrinkle: npm's packlist silently drops any file literally named
-`.gitignore`, so the snapshot ships it as `.gitignore.template` and the
-generator strips the `.template` suffix on materialize (`prod-claw/.gitignore`).
-Any future file npm would drop is handled the same way — name it `*.template`
-in `template/` and it materializes correctly.
-
-The immutable tokens `harness`, `hermes`, and `boldblackai`/`BoldBlack AI`
-(including the upstream image `ghcr.io/boldblackai/harness`) are never touched —
-a `bclaw`-only replace cannot reach them.
 
 ## Development
-
-Toolchain is governed by [capotej/patterns](https://github.com/capotej/patterns)
-conventions: TypeScript + `tsc` (P006), pnpm (P004), Biome (P005), mise (P003),
-actionlint (P009), SHA-pinned Actions (P002).
 
 ```bash
 pnpm install          # installs deps + builds dist/ (prepare)
@@ -79,9 +73,7 @@ pnpm test             # tsc && node --test (golden test)
 
 ### Publishing
 
-Manual `npm publish` from a maintainer's machine (no release workflow for v1).
-CI gates lint + typecheck + the golden test on every push/PR; publishing is a
-deliberate human step.
+Run `npm publish`
 
 ## License
 
