@@ -1,0 +1,5 @@
+# AWS credentials / region — loaded by .envrc (direnv). Never commit.
+.env
+
+# direnv internal cache
+.direnv/

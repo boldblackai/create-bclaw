@@ -1,0 +1,603 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Hermes Agent claw on ECS Fargate — dedicated VPC, EFS-backed persistent
+  state (4 access points mirroring the harness CLI bind-mounts), SSM-backed
+  secrets, and a single-replica Fargate service with ECS Exec
+  (SSM Session Manager) shell-in. ARM64 by default (~20% cheaper).
+
+  Uses the signed upstream harness image as-is (no derived image). The
+  service is a Slack socket-mode bot, so it is outbound-only — no load
+  balancer, no inbound ports (the SG only allows self-referenced NFS for EFS).
+
+  Managed by the setup-harness-ecs-fargate / teardown-harness-ecs-fargate
+  agent skills. See docs/deploying/aws.md (Option A) in the harness repo for
+  the manual equivalent.
+
+# ── Parameters ──────────────────────────────────────────────────────────────
+
+Parameters:
+  ClawName:
+    Type: String
+    Default: bclaw
+    Description: >
+      Name of the claw. Prefixed onto every resource (cluster, log group,
+      IAM roles, EFS tags). NOT used for SSM secrets — those use a static
+      /bclaw/ namespace so a least-privilege IAM policy can pin the ARN.
+    MinLength: 1
+    MaxLength: 63
+    AllowedPattern: "^[a-zA-Z][a-zA-Z0-9-]*$"
+    ConstraintDescription: Alphanumeric and hyphens, must start with a letter.
+
+  HarnessImageTag:
+    Type: String
+    Default: hermes-1.9.0
+    Description: >
+      Tag of the ghcr.io/boldblackai/harness image to run. Bump to upgrade
+      the claw — no image rebuild (use the signed upstream image as-is).
+
+  CpuArchitecture:
+    Type: String
+    Default: ARM64
+    AllowedValues: [ARM64, X86_64]
+    Description: >
+      ARM64 is ~20% cheaper on Fargate and the harness image is published
+      multi-arch. Switch to X86_64 only if your account/region lacks ARM64
+      capacity. ARM64 placement is handled by giving the service 2 AZs and
+      letting Fargate's scheduler pick an ARM64-capable one (see note below).
+
+  TaskCpu:
+    Type: String
+    Default: "2048"
+    AllowedValues: ["256", "512", "1024", "2048", "4096"]
+    Description: Task CPU in CPU units. 2048 = 2 vCPU.
+
+  TaskMemory:
+    Type: String
+    Default: "4096"
+    AllowedValues: ["512", "1024", "2048", "3072", "4096", "6144", "8192", "16384"]
+    Description: Task memory in MiB. 4096 = 4 GiB.
+
+  TimeZone:
+    Type: String
+    Default: America/New_York
+    Description: TZ env var passed to the container.
+
+  AZ1:
+    Type: String
+    Default: us-east-1a
+    Description: >
+      First availability zone for the claw's subnets. The setup skill probes
+      ARM64 (Graviton) capability per-AZ via describe-instance-type-offerings
+      and passes the best two here; the default falls back to the first
+      account-available AZ. Fargate only places the ARM64 task in an AZ that
+      supports the requested cpuArchitecture.
+
+  AZ2:
+    Type: String
+    Default: us-east-1b
+    Description: Second AZ (see AZ1). Used so Fargate has a fallback if AZ1
+      lacks ARM64 capacity at placement time.
+
+  EnableOpenRouterKey:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Set to "true" to inject /bclaw/OPENROUTER_API_KEY into the container env
+      (requires the SSM parameter to exist). Defaults to "false" — the setup
+      skill enables exactly one provider key at deploy time based on the
+      inference provider the user chose (OpenRouter recommended).
+
+  EnableZaiKey:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Set to "true" to inject /bclaw/ZAI_API_KEY into the container env
+      (requires the SSM parameter to exist). Defaults to "false" so the
+      template works without a Z.AI key.
+
+  EnableAnthropicKey:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Set to "true" to inject /bclaw/ANTHROPIC_API_KEY into the container env
+      (requires the SSM parameter to exist). Defaults to "false" so the
+      template works without an Anthropic key.
+
+Conditions:
+  OpenRouterKeyEnabled: !Equals [!Ref EnableOpenRouterKey, "true"]
+  ZaiKeyEnabled: !Equals [!Ref EnableZaiKey, "true"]
+  AnthropicKeyEnabled: !Equals [!Ref EnableAnthropicKey, "true"]
+
+# ── Resources ───────────────────────────────────────────────────────────────
+#
+# ARM64 Fargate is not available in every AZ of every account (e.g. some
+# accounts lack it in us-east-1e/1f) and there is no API to probe per-AZ
+# ARM64 support. This template handles it by creating subnets in the first two
+# account-available AZs (Fn::GetAZs) and giving the ECS service both —
+# Fargate's scheduler only places the task in an AZ that supports the
+# requested cpuArchitecture. The setup skill reports which AZ landed.
+
+Resources:
+
+  # ── Networking: dedicated VPC, 2 public subnets across 2 AZs ──────────────
+  # Own VPC (not the default) so teardown is clean and the claw is isolated.
+  # 2 AZs so Fargate can pick an ARM64-capable one for placement.
+
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags: [{ Key: Name, Value: !Sub "${ClawName}-vpc" }]
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags: [{ Key: Name, Value: !Sub "${ClawName}-igw" }]
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.0.0/20
+      AvailabilityZone: !Ref AZ1
+      MapPublicIpOnLaunch: true
+      Tags: [{ Key: Name, Value: !Sub "${ClawName}-subnet-a" }]
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.16.0/20
+      AvailabilityZone: !Ref AZ2
+      MapPublicIpOnLaunch: true
+      Tags: [{ Key: Name, Value: !Sub "${ClawName}-subnet-b" }]
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags: [{ Key: Name, Value: !Sub "${ClawName}-rt-public" }]
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTable
+
+  SubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRouteTable
+
+  # ── Security group: self-referenced NFS (2049) for EFS, nothing else inbound─
+  # Outbound is fully open (default) — the bot polls Slack via socket mode.
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Ref ClawName
+      GroupDescription: !Sub "ECS + EFS for ${ClawName}"
+      VpcId: !Ref VPC
+      Tags: [{ Key: Name, Value: !Sub "${ClawName}-sg" }]
+
+  SecurityGroupSelfIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: tcp
+      FromPort: 2049
+      ToPort: 2049
+      SourceSecurityGroupId: !Ref SecurityGroup
+
+  # ── EFS: persistent claw state. 4 access points, uid/gid 1000 (harness user)─
+
+  EFSFileSystem:
+    Type: AWS::EFS::FileSystem
+    # Retain data across stack deletion — protects sessions/memories/skills.
+    # The teardown skill deletes this explicitly after user confirmation.
+    UpdateReplacePolicy: Retain
+    DeletionPolicy: Retain
+    Properties:
+      PerformanceMode: generalPurpose
+      ThroughputMode: bursting
+      Encrypted: true
+      FileSystemTags: [{ Key: Name, Value: !Sub "${ClawName}-data" }]
+
+  # One access point per persisted path — mirrors the harness CLI bind-mounts
+  # so hermes config/sessions, XDG config, and mise tools & trust all survive
+  # task restarts. EFS access points are why we DON'T need bclaw's fly
+  # single-volume Dockerfile/entrypoint here — EFS gives 4 native mounts.
+  HermesAccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      PosixUser: { Uid: "1000", Gid: "1000" }
+      RootDirectory:
+        Path: /hermes
+        CreationInfo: { OwnerUid: "1000", OwnerGid: "1000", Permissions: "0755" }
+      AccessPointTags: [{ Key: Name, Value: !Sub "${ClawName}-data" }]
+
+  ConfigAccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      PosixUser: { Uid: "1000", Gid: "1000" }
+      RootDirectory:
+        Path: /xdg-config
+        CreationInfo: { OwnerUid: "1000", OwnerGid: "1000", Permissions: "0755" }
+      AccessPointTags: [{ Key: Name, Value: !Sub "${ClawName}-data" }]
+
+  MiseDataAccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      PosixUser: { Uid: "1000", Gid: "1000" }
+      RootDirectory:
+        Path: /mise-data
+        CreationInfo: { OwnerUid: "1000", OwnerGid: "1000", Permissions: "0755" }
+      AccessPointTags: [{ Key: Name, Value: !Sub "${ClawName}-data" }]
+
+  MiseStateAccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      PosixUser: { Uid: "1000", Gid: "1000" }
+      RootDirectory:
+        Path: /mise-state
+        CreationInfo: { OwnerUid: "1000", OwnerGid: "1000", Permissions: "0755" }
+      AccessPointTags: [{ Key: Name, Value: !Sub "${ClawName}-data" }]
+
+  # Mount targets in both subnets — a task can land in either AZ.
+  EFSMountTargetA:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      SubnetId: !Ref PublicSubnetA
+      SecurityGroups: [!Ref SecurityGroup]
+
+  EFSMountTargetB:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      SubnetId: !Ref PublicSubnetB
+      SecurityGroups: [!Ref SecurityGroup]
+
+  # ── KMS: customer-managed key for SSM SecureString encryption ─────────────
+  # A dedicated CMK (not the default alias/aws/ssm) so the deployer IAM policy
+  # can pin kms:Decrypt to this key only — via kms:ResourceAliases on the
+  # deterministic alias (alias/${ClawName}-ssm). SSM params are encrypted with
+  # this key (Phase 3 selects it as the KMS Key ID when creating each
+  # SecureString in the console).
+  # Retained on stack delete (like EFS); teardown skill schedules deletion.
+
+  SsmKmsKey:
+    Type: AWS::KMS::Key
+    UpdateReplacePolicy: Retain
+    DeletionPolicy: Retain
+    Properties:
+      Description: !Sub "KMS key for ${ClawName} SSM SecureString parameters"
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EnableIAMUserPolicies
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+
+  SsmKmsAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${ClawName}-ssm"
+      TargetKeyId: !Ref SsmKmsKey
+
+  # ── Secrets are NOT CloudFormation resources ──────────────────────────────
+  # Following the piranesi pattern, secrets live in SSM Parameter Store as
+  # namespaced SecureString parameters (e.g. /bclaw/OPENROUTER_API_KEY) that
+  # the USER writes in a skill phase (Phase 2) before the service scales up.
+  # They are not owned by this stack, so they survive stack deletes and stack
+  # updates never clobber their values.
+  #
+  # The namespace is hardcoded as /bclaw/ (not derived from ClawName) so a
+  # least-privilege deployer policy can pin arn:...:parameter/bclaw/* at
+  # policy-authoring time. Consequence: one claw per AWS account (a second
+  # claw's /bclaw/* params would collide). The task definition's `secrets[]`
+  # below references them by constructed ARN. The execution role is granted
+  # ssm:GetParameters scoped to /bclaw/*. The service starts at DesiredCount
+  # 0; the skill scales it to 1 only after the SSM parameters exist —
+  # otherwise the task would fail to fetch them and crash-loop.
+  #
+  # The claw is a Slack socket-mode bot (see README + slack-manifest.json).
+  # Always-required parameters (unconditional in secrets[]):
+  #   /bclaw/SLACK_BOT_TOKEN     — Slack bot OAuth token (xoxb-)
+  #   /bclaw/SLACK_APP_TOKEN     — Slack app-level token (xapp-, socket mode)
+  #   /bclaw/SLACK_ALLOWED_USERS — comma-separated Slack user IDs
+  #   /bclaw/SLACK_HOME_CHANNEL  — Slack home channel ID
+  #   /bclaw/GH_TOKEN_VAL        — GitHub PAT (on-boot `gh auth login`, see
+  #                                  the container Command below). Named
+  #                                  *_VAL, not GH_TOKEN, to avoid colliding
+  #                                  with gh's reserved env var (which makes
+  #                                  `gh auth login` refuse to store).
+  # Opt-in inference-provider key (inject the ONE matching Enable*Key=true at
+  # deploy time — see the !If entries in secrets[] below):
+  #   /bclaw/OPENROUTER_API_KEY  — OpenRouter API key (recommended)
+  #   /bclaw/ANTHROPIC_API_KEY   — Anthropic (direct Claude API)
+  #   /bclaw/ZAI_API_KEY         — Z.AI / Zhipu (GLM)
+
+  # ── IAM: execution role (pull image, read SSM params, write logs) ─────────
+
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ClawName}-exec"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: read-ssm-params
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameters
+                  - ssm:GetParameter
+                # Scoped to the static /bclaw namespace (not the claw name)
+                # so the least-privilege policy is deterministic. WithDecryption
+                # is implied by GetParameters when the caller has kms:Decrypt.
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/bclaw/*"
+              - Effect: Allow
+                # Scoped to the claw's own CMK (created above as SsmKmsKey),
+                # NOT key/* — the deployer policy pins this via kms:ResourceAliases
+                # on alias/${ClawName}-ssm. WithDecryption is implied by
+                # GetParameters when the caller has kms:Decrypt.
+                Action: kms:Decrypt
+                Resource: !GetAtt SsmKmsKey.Arn
+                Condition:
+                  StringEquals:
+                    "kms:ViaService": !Sub "ssm.${AWS::Region}.amazonaws.com"
+
+  # ── IAM: task role (used by the container; needs ssmmessages for ECS Exec) ──
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ClawName}-task"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ecs-exec
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                Resource: "*"
+
+  # ── Logs ──────────────────────────────────────────────────────────────────
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/${ClawName}"
+      RetentionInDays: 14
+
+  # ── ECS cluster ───────────────────────────────────────────────────────────
+
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref ClawName
+      Configuration:
+        ExecuteCommandConfiguration:
+          Logging: DEFAULT
+
+  # ── Task definition ───────────────────────────────────────────────────────
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn: [EFSMountTargetA, EFSMountTargetB]
+    Properties:
+      Family: !Ref ClawName
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      Cpu: !Ref TaskCpu
+      Memory: !Ref TaskMemory
+      RuntimePlatform:
+        OperatingSystemFamily: LINUX
+        CpuArchitecture: !Ref CpuArchitecture
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: hermes
+          Image: !Sub "ghcr.io/boldblackai/harness:${HarnessImageTag}"
+          Essential: true
+          # The image's ENTRYPOINT is [/tini, --, /entrypoint.sh] (verified via
+          # /proc/1 in a running container). ECS `Command` overrides only CMD,
+          # NOT ENTRYPOINT — so tini still runs as PID 1 (signal forwarding +
+          # zombie reaping) and /entrypoint.sh still runs first. The entrypoint
+          # sources setup-env.sh (routes GIT_CONFIG_GLOBAL into persisted
+          # ~/.config and seeds the gh git-credential helper), seeds
+          # config.yaml, then does `exec "$@"` where "$@" is this Command.
+          # That's why tini is not repeated here and why InitProcessEnabled is
+          # absent — tini (from the image ENTRYPOINT) is the init, and a second
+          # ECS init layer on top of it would be redundant.
+          #
+          # This Command authenticates gh from the GH_TOKEN_VAL SSM secret on
+          # every boot — token-rotation-safe (update GH_TOKEN_VAL in SSM and
+          # the next task start re-runs the login). Non-fatal: a failed login
+          # is logged to CloudWatch and the gateway still starts (the Slack bot
+          # is the primary function; gh is a secondary tool). printf (not echo)
+          # avoids any token-prefix flag interpretation.
+          #
+          # Why the secret is named GH_TOKEN_VAL, not GH_TOKEN: when the env var
+          # `GH_TOKEN` is present, `gh auth login --with-token` refuses to store
+          # the token into ~/.config/gh/hosts.yml (it prints "the GH_TOKEN
+          # environment variable is being used" and exits 1 — a gh safety
+          # feature). Injecting the secret under a non-reserved name avoids the
+          # collision entirely, so gh reads the token from stdin and stores it.
+          # Storing is NECESSARY, not optional: the harness
+          # terminal/execute_code sandbox scrubs token-like env vars from its
+          # environment, so `gh`/git calls the agent makes find no env var —
+          # they rely on the stored credential in hosts.yml (on EFS, persists
+          # across restarts).
+          Command:
+            - sh
+            - -c
+            - 'printf "%s" "$GH_TOKEN_VAL" | gh auth login --with-token 2>&1 || echo "[gh-auth] login failed (non-fatal)"; exec hermes gateway'
+          User: "1000:1000"
+          Environment:
+            - { Name: TZ, Value: !Ref TimeZone }
+            - { Name: HARNESS_CLOUD_MODE, Value: "1" }
+            - { Name: HERMES_HOME, Value: "/home/harness/.hermes" }
+            - { Name: HF_HOME, Value: "/home/harness/.hermes/.cache/huggingface" }
+          Secrets:
+            - { Name: SLACK_BOT_TOKEN,      ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/bclaw/SLACK_BOT_TOKEN" }
+            - { Name: SLACK_APP_TOKEN,      ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/bclaw/SLACK_APP_TOKEN" }
+            - { Name: SLACK_ALLOWED_USERS,  ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/bclaw/SLACK_ALLOWED_USERS" }
+            - { Name: SLACK_HOME_CHANNEL,   ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/bclaw/SLACK_HOME_CHANNEL" }
+            - { Name: GH_TOKEN_VAL,         ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/bclaw/GH_TOKEN_VAL" }
+            - !If
+              - OpenRouterKeyEnabled
+              - { Name: OPENROUTER_API_KEY, ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/bclaw/OPENROUTER_API_KEY" }
+              - !Ref AWS::NoValue
+            - !If
+              - ZaiKeyEnabled
+              - { Name: ZAI_API_KEY, ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/bclaw/ZAI_API_KEY" }
+              - !Ref AWS::NoValue
+            - !If
+              - AnthropicKeyEnabled
+              - { Name: ANTHROPIC_API_KEY, ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/bclaw/ANTHROPIC_API_KEY" }
+              - !Ref AWS::NoValue
+          MountPoints:
+            - { SourceVolume: hermes-data,       ContainerPath: /home/harness/.hermes,           ReadOnly: false }
+            - { SourceVolume: hermes-config,     ContainerPath: /home/harness/.config,           ReadOnly: false }
+            - { SourceVolume: hermes-mise-data,  ContainerPath: /home/harness/.local/share/mise, ReadOnly: false }
+            - { SourceVolume: hermes-mise-state, ContainerPath: /home/harness/.local/state/mise, ReadOnly: false }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: hermes
+      Volumes:
+        - Name: hermes-data
+          EFSVolumeConfiguration:
+            FileSystemId: !Ref EFSFileSystem
+            TransitEncryption: ENABLED
+            AuthorizationConfig: { AccessPointId: !Ref HermesAccessPoint, IAM: DISABLED }
+        - Name: hermes-config
+          EFSVolumeConfiguration:
+            FileSystemId: !Ref EFSFileSystem
+            TransitEncryption: ENABLED
+            AuthorizationConfig: { AccessPointId: !Ref ConfigAccessPoint, IAM: DISABLED }
+        - Name: hermes-mise-data
+          EFSVolumeConfiguration:
+            FileSystemId: !Ref EFSFileSystem
+            TransitEncryption: ENABLED
+            AuthorizationConfig: { AccessPointId: !Ref MiseDataAccessPoint, IAM: DISABLED }
+        - Name: hermes-mise-state
+          EFSVolumeConfiguration:
+            FileSystemId: !Ref EFSFileSystem
+            TransitEncryption: ENABLED
+            AuthorizationConfig: { AccessPointId: !Ref MiseStateAccessPoint, IAM: DISABLED }
+
+  # ── Service: starts at DesiredCount 0; skill scales to 1 after secrets ─────
+
+  Service:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: !Ref ClawName
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: 0
+      LaunchType: FARGATE
+      EnableExecuteCommand: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets:
+            - !Ref PublicSubnetA
+            - !Ref PublicSubnetB
+          SecurityGroups: [!Ref SecurityGroup]
+          AssignPublicIp: ENABLED
+
+# ── Outputs ─────────────────────────────────────────────────────────────────
+
+Outputs:
+  ClawName:
+    Value: !Ref ClawName
+  ClusterName:
+    Value: !Ref Cluster
+  ServiceName:
+    Value: !Ref Service
+  TaskDefinitionArn:
+    Value: !Ref TaskDefinition
+  EFSFileSystemId:
+    Value: !Ref EFSFileSystem
+  SubnetA:
+    Value: !Ref PublicSubnetA
+  SubnetB:
+    Value: !Ref PublicSubnetB
+  VpcId:
+    Value: !Ref VPC
+  SecurityGroupId:
+    Value: !Ref SecurityGroup
+  ExecutionRoleArn:
+    Value: !GetAtt ExecutionRole.Arn
+  TaskRoleArn:
+    Value: !GetAtt TaskRole.Arn
+  LogGroup:
+    Value: !Ref LogGroup
+  SsmParameterPrefix:
+    Value: "/bclaw"
+    Description: >
+      Static SSM SecureString parameter namespace (NOT derived from the claw
+      name, so a least-privilege IAM policy can pin parameter/bclaw/*). The
+      5 always-required params live here: SLACK_BOT_TOKEN, SLACK_APP_TOKEN,
+      SLACK_ALLOWED_USERS, SLACK_HOME_CHANNEL, GH_TOKEN_VAL. Plus exactly one
+      opt-in provider key (OPENROUTER_API_KEY, ANTHROPIC_API_KEY, or
+      ZAI_API_KEY) selected via the Enable*Key stack parameters.
+  KmsKeyArn:
+    Value: !GetAtt SsmKmsKey.Arn
+    Description: >
+      Customer-managed KMS key for SSM SecureString encryption. The deployer
+      policy pins kms:Decrypt to this key via kms:ResourceAliases on
+      alias/${ClawName}-ssm. Pass --key-id alias/${ClawName}-ssm to
+      ssm put-parameter in Phase 3.
+  KmsKeyAlias:
+    Value: !Sub "alias/${ClawName}-ssm"
