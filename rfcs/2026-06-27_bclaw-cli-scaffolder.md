@@ -1,7 +1,7 @@
 # bclaw CLI scaffolder (`@boldblackai/create-bclaw`)
 
 **Date:** 2026-06-27
-**Status:** Proposed
+**Status:** Implemented
 
 ## Goal
 
@@ -166,34 +166,63 @@ is a deliberate human step.
 - Existing single-claw `bclaw` deployments are unaffected: they keep their
   `/bclaw/` namespace and IAM scope; the generator only governs *new* claws.
 
-## Implementation Checklist
+## Implementation Notes
 
-- [ ] `package.json`: `name: @boldblackai/create-bclaw`, `bin: create-bclaw`,
-      `packageManager: pnpm@<exact>`, `type: module`, `files: [dist, template]`,
-      scripts (`build`, `prepare`, `lint`, `lint:fix`, `format`, `sync:template`,
-      `test`); `dependencies: @clack/prompts`; `devDependencies: typescript,
-      @types/node, @biomejs/biome`.
-- [ ] `tsconfig.json` per P006 (strict, NodeNext/ES2022, `src`→`dist`).
-- [ ] `biome.json` per P005 (ignore `template/`, `dist/`, caches).
-- [ ] `mise.toml` per P003 (node 22, actionlint via github source).
-- [ ] `src/cli.ts`: clack `intro`/`text`/`confirm`/`outro`, arg parsing,
-      `--force`/`--version`/`--help`, name validation (`^[a-zA-Z][a-zA-Z0-9-]*$`,
-      ≤59), refuse-non-empty-dir.
-- [ ] `src/generate.ts`: copy `template/` → `./<name>/`, literal `bclaw`→`<name>`
-      on contents + path components, hard "no `bclaw` remains" assertion,
-      `git init` + initial commit.
-- [ ] `scripts/sync-template`: copy `references/bclaw-repo` → `template/`
-      (exclude `.git`, `.env`).
-- [ ] Fix `references/bclaw-repo/.../template.yaml`: `ClawName.MaxLength` 63→59.
-- [ ] Delete static-namespace/one-claw-per-account prose from
-      `references/bclaw-repo` (README ×3, AGENTS.md, setup SKILL.md, template
-      comments).
-- [ ] Add `references/bclaw-repo/.env.example` (placeholders for
-      `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_REGION`, `AWS_PROFILE`
-      alt as comment; `.env` stays gitignored).
-- [ ] Golden test (invariant 1/2/3 above).
-- [ ] CI workflow: Biome + actionlint lint, `tsc --noEmit`, golden test on
-      Node 22; SHA-pinned actions (P002).
-- [ ] `.actionlint.yaml` (P009); `.gitignore` (`node_modules/`, `.pnpm-store`,
-      `dist/`).
-- [ ] Package `README.md` with `npx`/`npm init` usage.
+Shipped as `@boldblackai/create-bclaw` v0.1.0. All checklist items landed:
+
+- **Toolchain (P002–P006, P009):** `package.json` (`name: @boldblackai/create-bclaw`,
+  `bin: create-bclaw`, `packageManager: pnpm@11.9.0`, `type: module`,
+  `files: [dist, template]`, scripts `build`/`prepare`/`lint`/`lint:fix`/`format`/
+  `sync:template`/`test`; dep `@clack/prompts`; devDeps `typescript`,
+  `@types/node`, `@biomejs/biome` — all exact-pinned). `tsconfig.json` (strict,
+  NodeNext/ES2022, `src`→`dist`). `biome.json` (2.5.1, version-matched `$schema`,
+  ignores `dist/`/`template/`/`references/`). `mise.toml` (node 22.23.1,
+  actionlint v1.7.12). `.actionlint.yaml` + `.gitignore` (`node_modules/`,
+  `.pnpm-store/`, `dist/`, `.jj/`, `*.tgz` — npm pack output is never committed
+  since publishing is a manual step).
+- **Generator:** `src/cli.ts` (clack `intro`/`text`/`confirm`/`note`/`outro`,
+  arg parsing, `--force`/`--version`/`-V`/`--help` with unknown-flag rejection,
+  name validation `^[a-zA-Z]([a-zA-Z0-9-]*[a-zA-Z0-9])?$` ≤59 — forbids a
+  trailing hyphen so identifiers like `<name>-exec` never double up, kept in
+  lockstep with the CloudFormation `AllowedPattern`; non-empty-target refusal,
+  non-TTY guard so the prompt path never hangs when piped) and `src/generate.ts`
+  (copy `template/` → `./<name>/`, literal `bclaw`→`<name>` on contents + path
+  components, the same replace on symlink target strings (so a `bclaw`-bearing
+  link target survives the rename rather than dangling), strip a trailing
+  `.template` suffix from each basename on materialize (npm packlist drops a
+  literal `.gitignore`, so the snapshot ships `.gitignore.template` and
+  materializes as `<name>/.gitignore`), hard "no `bclaw` remains" assertion that
+  inspects file contents, path components, AND symlink target strings, best-effort
+  `git init` + initial commit with a local identity fallback for fresh
+  environments). The assertion is guarded by `!name.includes("bclaw")` so the
+  no-op case (`create-bclaw bclaw`) and embedded tokens (e.g. `mybclaw`) are
+  handled correctly.
+- **Template sync:** `scripts/sync-template` copies `references/bclaw-repo` →
+  `template/` (excludes `.git`, `.env`; keeps `.envrc` + `.env.example`); wired
+  as `pnpm sync:template`.
+- **Source-template fixes:** `ClawName.MaxLength` 63→59 and
+  `AllowedPattern` tightened to `^[a-zA-Z]([a-zA-Z0-9-]*[a-zA-Z0-9])?$` (no
+  trailing hyphen) in `template.yaml`, so deploy-time validation agrees with the
+  generator's regex; the
+  static-namespace / one-claw-per-account prose deleted from `README.md` (×3),
+  `AGENTS.md`, the setup `SKILL.md` (Phase 1 & 3), and the `template.yaml`
+  comments (the `/bclaw/` literal in `secrets[]`, the execution-role `Resource`,
+  and the `SsmParameterPrefix` `Value` are retained as rename targets).
+- **`.env.example`:** added to `references/bclaw-repo` (placeholder-only stub
+  for `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_REGION` with an
+  `AWS_PROFILE` alternative comment); `.env` stays gitignored.
+- **Verification:** `test/golden.test.mjs` (node:test, zero added deps) asserts
+  all three invariants — (1) `create-bclaw bclaw` == `template/`, (2)
+  `create-bclaw foo` == bclaw output renamed, (3) zero residual `bclaw` — plus
+  CLI smoke tests for name validation (incl. the 59/60 boundary and a trailing
+  hyphen), the `--force` non-empty-target guard, unknown-flag rejection, the
+  `-V`/`-v` split, and the symlink-target rename (drives the `generate` API
+  directly). 10 tests total, each introduced RED before its implementation.
+- **CI:** `.github/workflows/ci.yml` runs Biome + actionlint (1.7.12, matching
+  `mise.toml`) + `tsc --noEmit` + the golden test on Node 22, with all actions
+  SHA-pinned per P002.
+- **Docs:** package `README.md` (`npx`/`npm init` usage, dev workflow,
+  `sync:template`); root `AGENTS.md` updated with the Overview + tooling sections
+  introduced by this RFC.
+
+Publishing remains a manual `npm publish` (no release workflow for v1).

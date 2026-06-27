@@ -1,0 +1,50 @@
+{
+  "name": "@boldblackai/create-bclaw",
+  "version": "0.1.0",
+  "description": "Scaffold a renamed Hermes Agent claw (Slack socket-mode bot on AWS ECS Fargate).",
+  "type": "module",
+  "bin": {
+    "create-bclaw": "dist/cli.js"
+  },
+  "packageManager": "pnpm@11.9.0",
+  "files": [
+    "dist",
+    "template"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepare": "tsc",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "format": "biome format --write .",
+    "sync:template": "bash scripts/sync-template",
+    "test": "tsc && node --test"
+  },
+  "dependencies": {
+    "@clack/prompts": "1.6.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.1",
+    "@types/node": "22.20.0",
+    "typescript": "6.0.3"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "keywords": [
+    "create",
+    "scaffold",
+    "hermes",
+    "harness",
+    "ecs",
+    "fargate",
+    "slack",
+    "aws"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/boldblackai/create-bclaw.git"
+  },
+  "homepage": "https://github.com/boldblackai/create-bclaw#readme"
+}

@@ -1,0 +1,3 @@
+ignore:
+  # ci.yml may use common GH Actions patterns (>> "$GITHUB_ENV") that trip shellcheck
+  - 'shellcheck reported issue'

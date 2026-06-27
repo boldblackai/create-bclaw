@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6
+
+      - name: Setup Node 22
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # actionlint version MUST match mise.toml (v1.7.12). The download script
+      # takes the bare version (no leading v). See P009.
+      - name: Install actionlint
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash \
+            | bash -s -- 1.7.12 /usr/local/bin
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Biome lint
+        run: pnpm lint
+
+      - name: actionlint
+        run: actionlint
+
+      - name: Typecheck
+        run: pnpm exec tsc --noEmit
+
+      - name: Golden test
+        run: pnpm test
