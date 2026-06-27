@@ -1,4 +1,0 @@
-[tools]
-aws-cli = "latest"
-direnv = "latest"
-jj = "latest"

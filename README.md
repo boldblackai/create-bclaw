@@ -46,8 +46,8 @@ tokens, or run `mise install` — those belong to the bundled skills' setup flow
 
 ## How the rename works
 
-The bundled `template/` is a snapshot of `references/bclaw-repo` (the source of
-truth, owned by this repo). At runtime the CLI copies `template/` → `./<name>/`
+The bundled `template/` is the source of truth — a Hermes Agent claw on ECS
+Fargate, shipped inside the package. At runtime the CLI copies `template/` → `./<name>/`
 and applies a single literal replace — lowercase `bclaw` → `<name>` — to text
 file contents and path components. Every `bclaw` in the source is lowercase and
 standalone, so a literal substring replace is the whole transform and is
@@ -76,19 +76,6 @@ pnpm exec tsc --noEmit  # typecheck only
 pnpm lint             # biome check .
 pnpm test             # tsc && node --test (golden test)
 ```
-
-### Refreshing the template snapshot
-
-`references/bclaw-repo` is the source of truth; `template/` is the derived
-artifact shipped in the package. After editing the source:
-
-```bash
-pnpm sync:template    # references/bclaw-repo → template/ (excludes .git, .env)
-pnpm test             # invariant 1 asserts template/ == create-bclaw bclaw output
-```
-
-Then commit both. The golden CI test fails if the snapshot drifts from the
-source.
 
 ### Publishing
 

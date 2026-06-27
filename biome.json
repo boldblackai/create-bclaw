@@ -6,7 +6,7 @@
     "useIgnoreFile": true
   },
   "files": {
-    "includes": ["**", "!dist", "!template", "!references"]
+    "includes": ["**", "!dist", "!template"]
   },
   "linter": {
     "enabled": true,

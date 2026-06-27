@@ -18,16 +18,15 @@ Significant changes, architectural decisions, and new features should be propose
 ## Overview
 
 This repo is `@boldblackai/create-bclaw`, an `npx`-distributed CLI that
-generates a renamed skeleton of `references/bclaw-repo`. Running
+generates a renamed skeleton of a Hermes Agent claw repo. Running
 `npx @boldblackai/create-bclaw foo` produces a `foo/` directory whose contents
 match the bundled `template/` snapshot except every lowercase `bclaw` reference
 — file contents and file/directory names, including the SSM namespace, IAM
 scopes, and KMS alias — is renamed to `foo`. See
 `rfcs/2026-06-27_bclaw-cli-scaffolder.md` for the full design.
 
-- `references/bclaw-repo/` is the **source of truth** (a Hermes Agent claw repo).
-- `template/` is the **derived snapshot** shipped inside the npm package;
-  refresh it with `pnpm sync:template` after editing the source.
+- `template/` is the **source of truth** (a Hermes Agent claw repo snapshot)
+  shipped inside the npm package; edit it directly.
 - `src/` is the generator (`cli.ts` + `generate.ts`); `test/golden.test.mjs` is
   the correctness proof.
 
@@ -75,9 +74,8 @@ config.
 Configuration lives in `biome.json`. The `@biomejs/biome` version is pinned
 exactly in `package.json` devDependencies; the `$schema` URL in `biome.json`
 must match that version — if you bump Biome, bump both in the same change.
-`biome.json` ignores `dist/`, `template/`, and `references/` (via `vcs.useIgnoreFile`
-+ explicit excludes) so the compiled output, the bundled snapshot, and the
-source-of-truth reference repo are never linted.
+`biome.json` ignores `dist/` and `template/` (via `vcs.useIgnoreFile`
++ explicit excludes) so the compiled output and bundled snapshot are never linted.
 
 Before finishing any code change, run `pnpm lint`.
 

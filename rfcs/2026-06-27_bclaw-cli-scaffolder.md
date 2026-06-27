@@ -3,6 +3,12 @@
 **Date:** 2026-06-27
 **Status:** Implemented
 
+> **Post-implementation note:** `references/bclaw-repo` (the source-of-truth repo)
+> and `scripts/sync-template` (the snapshot regenerator) were subsequently removed.
+> `template/` is now edited directly as the sole canonical snapshot; the
+> `pnpm sync:template` workflow no longer exists. Sections below that reference
+> those describe the original v0.1.0 design.
+
 ## Goal
 
 Ship an `npx`-distributed CLI that generates a renamed skeleton of
