@@ -51,82 +51,20 @@ before proceeding.
 
 ---
 
-### Phase 0: Pre-flight — verify teardown permissions
+### Phase 0: Pre-flight — confirm AWS access
 
-**Gate: `simulate-principal-policy` shows no `denied` delete actions.**
+**Gate: `aws sts get-caller-identity` succeeds.**
 
-Mirror of the setup skill's Phase 0, scoped to the **delete** action set.
-Avoids a half-torn-down stack when the principal lacks a delete permission
-mid-way through. Get the caller ARN and simulate:
-
-> **Caveat: `simulate-principal-policy` is unreliable in BOTH directions
-> for this deployer policy unless called with `--context-entries` for tag
-> conditions.** The deployer policy uses two different scoping mechanisms:
->
-> - **ARN-scoped** (VPC/subnet/SG): the policy pins specific physical ARNs
->   from the latest stack deployment. Without `--resource-arns`, the
->   simulator tests at `*` scope and **overestimates** — shows "allowed"
->   when the actual resources from earlier stacks have different ARNs and
->   are truly outside scope. These resources CAN'T be deleted by the
->   deployer.
-> - **Tag-conditioned** (EFS delete/manage via `aws:ResourceTag/Name:
->   bclaw*`): without `--context-entries`, the simulator **underestimates**
->   — returns `implicitDeny` because it can't evaluate the tag condition.
->   But the actual API calls work: `describe-file-systems` and
->   `describe-mount-targets` succeed despite the false simulate denial.
->   Retained EFS orphans tagged `Name=bclaw-data` ARE within the tag scope
->   and are likely deletable — do NOT assume "can't delete" from the bare
->   simulate alone. Try the actual operation.
-> - **SSM is truly denied** (zero SSM actions in the policy) — this is a
->   real `implicitDeny`, not a tag-condition false negative.
->
-> The query below uses `EvalDecision!=\`allowed\`` (catches both
-> `explicitDeny` and `implicitDeny`) WITH `--context-entries` so
-> tag-conditioned EFS/EC2 actions evaluate correctly. Even so, treat the
-> gate as necessary but not sufficient — when the simulate and the actual
-> API behavior disagree, trust the API.
+Confirm the shell's AWS credentials are live and identify the principal that
+will run the deletes:
 
 ```bash
-CALLER_ARN=$(aws sts get-caller-identity --query 'Arn' --output text)
-
-aws iam simulate-principal-policy \
-  --policy-source-arn "$CALLER_ARN" \
-  --action-names \
-      cloudformation:DeleteStack cloudformation:DescribeStacks \
-      ecs:UpdateService ecs:DeleteService ecs:DeleteCluster ecs:StopTask \
-      ecs:DescribeServices ecs:DescribeClusters ecs:ListTasks \
-      elasticfilesystem:DeleteFileSystem elasticfilesystem:DeleteAccessPoint \
-      elasticfilesystem:DeleteMountTarget elasticfilesystem:DescribeMountTargets \
-      iam:DeleteRole iam:DeleteRolePolicy iam:DetachRolePolicy \
-      iam:GetRole iam:ListRolePolicies iam:ListAttachedRolePolicies \
-      ec2:DeleteVpc ec2:DeleteSubnet ec2:DeleteSecurityGroup \
-      ec2:DeleteInternetGateway ec2:DetachInternetGateway \
-      ec2:DeleteRouteTable ec2:DisassociateRouteTable ec2:DeleteRoute \
-      ec2:DescribeVpcs ec2:DescribeSubnets ec2:DescribeSecurityGroups \
-      logs:DeleteLogGroup logs:DescribeLogGroups \
-      ssm:DeleteParameter ssm:DescribeParameters \
-  --context-entries \
-    '[{"ContextKeyName":"aws:ResourceTag/Name","ContextKeyType":"string","ContextKeyValues":["bclaw-data"]}]' \
-  --query 'EvaluationResults[?EvalDecision!=`allowed`].EvalActionName' --output text | tr '\t' '\n'
+aws sts get-caller-identity --query 'Arn' --output text
 ```
 
-Empty output → proceed. Any action listed → check whether it's expected:
-
-- **`ssm:DeleteParameter` / `ssm:DescribeParameters`**: expected — the
-  deployer policy has zero SSM actions (Phase 4 handles this via console
-  fallback). Proceed; do not treat as a blocker.
-- **EFS actions** (`elasticfilesystem:Delete*` / `DescribeMountTargets`):
-  should NOT appear — the `--context-entries` above provides the tag
-  condition. If they do, the policy may have changed; try the actual
-  operation before assuming denial (see Phase 0 caveat above).
-- **Any other action**: real gap. Abort and tell the user which permissions
-  to add (the `bclaw-deploy` policy in the README already covers teardown;
-  point the user there if they never attached it).
-
-> If `iam:SimulatePrincipalPolicy` is itself denied, skip the simulation and
-> proceed to Phase 1 — the delete operations will surface real errors if any
-> permission is missing. Teardown is somewhat self-correcting (a failed delete
-> leaves the resource behind and Phase 5's verification catches it).
+Teardown is self-correcting: a failed delete leaves the resource behind and
+Phase 5's verification catches any leftovers, so real permission gaps surface
+as the phases run rather than up front.
 
 ---
 
@@ -148,10 +86,19 @@ aws ecs update-service \
 Wait for the service to reach 0 running tasks:
 
 ```bash
-aws ecs wait services-inactive \
-  --cluster "$CLAW_NAME" \
-  --services "$CLAW_NAME" \
-  --region "$AWS_REGION"
+# services-inactive waits for status INACTIVE (only set by DeleteService);
+# scale-to-0 only drains runningCount. Poll that directly instead.
+for i in $(seq 1 30); do
+  RUNNING=$(aws ecs describe-services \
+    --cluster "$CLAW_NAME" \
+    --services "$CLAW_NAME" \
+    --region "$AWS_REGION" \
+    --query 'services[0].runningCount' --output text)
+  echo "[$((i*10))s] runningCount=$RUNNING"
+  [ "$RUNNING" = "0" ] && break
+  sleep 10
+done
+[ "$RUNNING" = "0" ] || echo "still draining — fall through to stop-task"
 ```
 
 If the wait times out (a task stuck in `STOPPING`), force it:
@@ -191,15 +138,22 @@ aws cloudformation wait stack-delete-complete \
 
 **Common delete failures and how to force-clean them:**
 
-- **EFS mount targets fail with 403.** CloudFormation's resource handler
-  uses the caller's credentials, and can fail to clear EFS mount targets
-  even though direct CLI calls (`describe-mount-targets`,
-  `delete-file-system`) succeed under the same principal — the deployer's
-  EFS permissions are tag-conditioned and may not evaluate identically
-  through CloudFormation's handler. If the mount targets are already gone
-  (verify with `aws efs describe-mount-targets` per FS — deployer CAN do
-  this directly via CLI), the stack is stuck only because CloudFormation
-  can't confirm the deletion. Fix: re-run `delete-stack` with
+- **`DELETE_FAILED`: CloudFormation can't confirm deletion of already-gone
+  resources.** The stack delete can fail not because a resource still exists,
+  but because CloudFormation's handler can't confirm a resource that's already
+  gone. Two manifestations observed on this deployer policy:
+  - **EFS mount targets (403).** The handler fails to clear them even though
+    direct CLI calls (`describe-mount-targets`, `delete-file-system`) succeed
+    under the same principal — EFS delete permissions are tag-conditioned
+    (`aws:ResourceTag/Name: bclaw-data`) and don't evaluate identically through
+    CloudFormation's handler. Verify they're gone with
+    `aws efs describe-mount-targets` per FS (deployer CAN do this via CLI).
+  - **IAM roles (`NoSuchEntity`).** The exec/task roles (`bclaw-*`) can be
+    deleted out from under the handler (e.g. a prior partial teardown), so the
+    handler 404s confirming a resource that no longer exists. Verify with
+    `aws iam get-role` for each `bclaw-*` role (returns `NoSuchEntity` if gone).
+  In both cases the resources are confirmed gone via direct CLI, but the stack
+  is stuck on handler confirmation. Fix: re-run `delete-stack` with
   `--deletion-mode FORCE_DELETE_STACK` (requires `cloudformation:DeleteStack`
   with the force capability). This skips resources that fail and continues
   deleting the rest.
@@ -216,7 +170,7 @@ aws cloudformation wait stack-delete-complete \
   ```bash
   EFS_ID=$(aws efs describe-file-systems \
     --region "$AWS_REGION" \
-    --query 'FileSystems[?Tags[?Key==`Name` && Value==`${CLAW_NAME}-data`]].FileSystemId' \
+    --query 'FileSystems[?Tags[?Key==`Name` && Value==`'"${CLAW_NAME}"'-data`]].FileSystemId' \
     --output text)
   echo "EFS to delete (Phase 3): $EFS_ID"
   ```
@@ -262,12 +216,9 @@ aws efs delete-file-system \
 > **EFS delete permissions are tag-conditioned, not absent.** The deployer
 > policy scopes EFS delete via `aws:ResourceTag/Name: bclaw*`, so file
 > systems tagged `Name=bclaw-data` (all of them, regardless of which stack
-> version created them) are within scope. `simulate-principal-policy`
-> returns false `implicitDeny` for these without `--context-entries` (see
-> Phase 0 caveat) — do NOT preemptively route to console based on the bare
-> simulate. Try the `delete-file-system` command directly. If it fails with
-> `AccessDeniedException`, note the file system IDs in the final report for
-> manual console cleanup (same pattern as Phase 4 SSM fallback). To delete
+> version created them) are within scope. Try the `delete-file-system`
+> command directly. If it fails with `AccessDeniedException`, note the file
+> system IDs in the final report for manual console cleanup. To delete
 > multiple retained EFS orphans, loop over all IDs returned by the
 > `describe-file-systems` tag query in Phase 2.
 
@@ -278,25 +229,33 @@ aws efs delete-file-system \
 **Gate: stack deleted (Phase 2); EFS handled (Phase 3, skipped or done).**
 
 The SSM parameters are not stack-owned, so they survive the stack delete. Delete
-them now. Use `--force-delete-without-recovery` for immediate deletion (the
-default is a 7-day recovery window).
+them now. `ssm delete-parameter` is immediate and irreversible (no recovery
+window — that only applies to Secrets Manager).
 
-> **The deployer IAM user may lack `ssm:DeleteParameter` entirely.** The SSM
-> params are created by the user with admin credentials during setup Phase 3
-> (piranesi pattern), and the deployer's policy may not include any SSM
-> actions. If the delete fails with `AccessDeniedException`, note the 6
-> parameter names in the final report for manual console cleanup instead of
-> treating it as a skill failure.
+> **The deployer policy grants the deletes directly.** Its `SSMSecrets`
+> statement allows `ssm:DeleteParameter` on
+> `arn:aws:ssm:*:*:parameter/bclaw/*`, so the deletes below succeed without a
+> console fallback. Only fall back to console cleanup if a delete fails with
+> `AccessDeniedException` for a param outside that ARN scope.
 
 ```bash
-for k in OPENROUTER_API_KEY SLACK_BOT_TOKEN SLACK_APP_TOKEN SLACK_ALLOWED_USERS SLACK_HOME_CHANNEL GH_TOKEN_VAL; do
-  aws ssm delete-parameter \
-    --name "/bclaw/$k" \
-    --region "$AWS_REGION" 2>&1 || echo "(already gone: /bclaw/$k)"
+# Delete ALL params under /bclaw/ — covers whichever provider key
+# (OPENROUTER_API_KEY | ANTHROPIC_API_KEY | ZAI_API_KEY) this deploy used.
+# The namespace is one-claw-per-account, so this is the full secret set.
+aws ssm describe-parameters \
+  --parameter-filters "Key=Name,Option=BeginsWith,Values=/bclaw/" \
+  --region "$AWS_REGION" \
+  --query 'Parameters[].Name' --output text | tr '\t' '\n' | while read -r p; do
+  [ -n "$p" ] || continue
+  if aws ssm delete-parameter --name "$p" --region "$AWS_REGION"; then
+    echo "deleted: $p"
+  else
+    echo "(already gone: $p)"
+  fi
 done
 ```
 
-Verify all 6 are gone:
+Verify the namespace is empty:
 
 ```bash
 aws ssm describe-parameters \
@@ -322,7 +281,7 @@ aws cloudformation describe-stacks \
 
 # No remaining EFS
 aws efs describe-file-systems --region "$AWS_REGION" \
-  --query 'FileSystems[?Tags[?Key==`Name` && Value==`${CLAW_NAME}-data`]]' \
+  --query 'FileSystems[?Tags[?Key==`Name` && Value==`'"${CLAW_NAME}"'-data`]]' \
   --output text | grep -q . \
   && echo "efs: STILL EXISTS" || echo "efs: gone"
 

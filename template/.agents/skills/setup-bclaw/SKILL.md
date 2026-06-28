@@ -144,9 +144,8 @@ first two as `AZ1`/`AZ2` and pass them to the stack deploy in Phase 2 as
   (b) switch to `X86_64` for `CpuArchitecture` (works in any AZ, ~20% more
       expensive).
 - If the probe **errors** (e.g. permissions), fall back to the template
-  defaults (literal string `us-east-1a`/`us-east-1b` — the template can no
-  longer use `!GetAZs` in parameter defaults, see
-  `references/template-pitfalls.md` §3) and let Fargate's scheduler handle
+  defaults (literal string `us-east-1a`/`us-east-1b` — the template can't use
+  `!GetAZs` in parameter defaults) and let Fargate's scheduler handle
   placement. Warn the user.
 
 Report the chosen AZs to the user before proceeding.
@@ -290,7 +289,7 @@ line. `EnableGitHubKey="$ENABLE_GH"` is safe to always pass — it's `"true"` or
 > `EnableOpenRouterKey=true` drops the provider key and the gateway comes up
 > with no model; omitting `EnableGitHubKey` reverts GitHub auth to off. Capture
 > current params with `describe-stacks` and re-pass them, then verify the live
-> task def matches intent — see `references/template-pitfalls.md` §7 and §10.
+> task def matches intent.
 
 Wait for `CREATE_COMPLETE` (the `deploy` command blocks until it finishes).
 
@@ -346,7 +345,7 @@ entire subsection if the user opted out.
 
 | SSM key | What it is | Where to find it |
 |---|---|---|
-| `/bclaw/GH_TOKEN_VAL` | GitHub PAT — used for on-boot `gh auth login` (see Phase 5a). Named `*_VAL`, not `GH_TOKEN`, to dodge `gh`'s reserved env var (see `references/on-boot-commands.md`) | https://github.com/settings/tokens (classic PAT or fine-grained; needs the scopes the claw's `gh`/git usage requires) |
+| `/bclaw/GH_TOKEN_VAL` | GitHub PAT — used for on-boot `gh auth login` (see Phase 5a). Named `*_VAL`, not `GH_TOKEN`, to dodge `gh`'s reserved env var | https://github.com/settings/tokens (classic PAT or fine-grained; needs the scopes the claw's `gh`/git usage requires) |
 
 **Inference-provider key (1, from Phase 1 `$INFER_PROVIDER`):** create the one
 matching the chosen provider — this is the key the gateway uses as its model
@@ -646,9 +645,7 @@ Report to the user:
   `update-service --force-new-deployment` (the boot command re-runs on every
   task start). `printf` (not `echo`) is used so a token beginning with `-`
  isn't parsed as a flag, and `%s` avoids a trailing newline (gh trims
- whitespace anyway). See `references/on-boot-commands.md` for the general
- on-boot-command pattern (boot-chain diagram, the non-fatal wrapper recipe,
- and why `Command`-overrides-CMD-not-ENTRYPOINT matters).
+ whitespace anyway).
 
 - **EFS access points enforce uid/gid 1000.** The harness user is uid/gid
   1000 (first/only regular user in the debian:stable-slim base image). The
@@ -661,12 +658,9 @@ Report to the user:
   in the account. The same tag-condition pattern also covers EC2
   networking: the `EC2Networking` actions are split into `EC2Describe`
   (star, read-only), `EC2NetworkingCreate` (star, unconditional — creating
-  EC2 resources is safe; see lessons doc), and `EC2NetworkingManage`
+  EC2 resources is safe), and `EC2NetworkingManage`
   (`aws:ResourceTag/Name: ${ClawName}*`). The
-  SecurityGroup carries a `Name=${ClawName}-sg` tag for the same reason. See
-  `references/iam-and-template-lessons.md` → "Least-Privilege Refactors (EC2
-  Networking)" for the full rationale (including why Create and Manage must be
-  separate statements) before touching the EC2 policy.
+  SecurityGroup carries a `Name=${ClawName}-sg` tag for the same reason.
 
 - **`EnableExecuteCommand` cannot be toggled on a running service silently.**
   The template sets it at creation. If you ever need to re-enable it after a
@@ -690,14 +684,24 @@ Report to the user:
   Persistent pull failures mean the task can't reach ghcr.io (check the SG
   allows outbound, and the VPC has an internet gateway).
 
-- **Stack updates reset DesiredCount to 0.** The template hardcodes
-  `DesiredCount: 0` (safe for initial deploy — prevents crash-looping before
-  secrets exist). But on a stack *update* (e.g. adding a new secret to the
-  task definition), CloudFormation reverts the running count to 0, stopping
-  the live task. After any stack update, re-scale:
-  `aws ecs update-service --cluster "$CLAW_NAME" --service "$CLAW_NAME" --desired-count 1 --region "$AWS_REGION"`
-  and wait for RUNNING. Future template improvement: make DesiredCount a
-  parameter (default 0, override to 1 on updates).
+- **Stack updates revert un-passed parameters to template defaults.**
+  `cloudformation deploy` applies the template's parameter `Default` to anything
+  omitted from `--parameter-overrides` — it does not remember the prior stack's
+  values. `DesiredCount` defaults to `1` (deliberately — a forgotten override
+  keeps the claw running instead of scaling it to 0), but a count the user
+  changed (e.g. scaled to 2) reverts unless re-passed. Before any stack update,
+  capture the live count and re-pass it:
+
+  ```bash
+  DESIRED=$(aws ecs describe-services --cluster "$CLAW_NAME" --services "$CLAW_NAME" \
+    --region "$AWS_REGION" --query 'services[0].desiredCount' --output text)
+  # then add  DesiredCount="$DESIRED"  to --parameter-overrides on the deploy
+  ```
+
+  The provider-key and GitHub overrides are stricter — their default is `false`,
+  so omitting them silently disables the feature (e.g. the gateway comes up
+  with no model). Capture current params with `describe-stacks` and re-pass
+  them, then verify the live task def matches intent.
 
 - **Adding new SSM secrets.** To forward an additional SSM parameter into the
   container env, add an entry to the task definition's `secrets[]` in
@@ -738,5 +742,4 @@ Report to the user:
   PyYAML linter (in `patch`/`write_file`) reports false-positive errors on
   CloudFormation intrinsic shorthand (`!Equals`, `!Sub`, `!If` — valid CFN, not
   valid plain YAML). Ignore those; instead validate with the CFN-tag-aware
-  script: `python3 scripts/validate-template.py`. See
-  `references/template-pitfalls.md` §11 for the full explanation.
+  script: `python3 scripts/validate-template.py`.
