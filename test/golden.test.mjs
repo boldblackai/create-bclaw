@@ -184,6 +184,15 @@ test("CLI: unknown flags are rejected", async () => {
   assert.notEqual(res.code, 0, "unknown flag --bogus should be rejected");
 });
 
+test("CLI: no name + non-TTY stdin exits non-zero with a hint", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "bclaw-notty-"));
+  // run() spawns with piped stdin → process.stdin.isTTY is undefined in the child,
+  // so the CLI must refuse to fall back to an interactive prompt.
+  const res = await run([], tmp);
+  assert.notEqual(res.code, 0, "should refuse when no name given and stdin is not a TTY");
+  assert.match(res.stderr, /stdin|name/i, "should explain why it refused");
+});
+
 test("CLI: a trailing hyphen in the name is rejected", async () => {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "bclaw-trail-"));
   const res = await run(["foo-"], tmp);
