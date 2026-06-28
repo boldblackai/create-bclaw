@@ -92,12 +92,24 @@ Use `ask_user_question` to collect:
    | anthropic | `EnableAnthropicKey` | `/bclaw/ANTHROPIC_API_KEY` |
    | zai | `EnableZaiKey` | `/bclaw/ZAI_API_KEY` |
 
+3. **GitHub authentication** — whether the agent should make authenticated
+   `gh`/HTTPS-git calls. This is OPTIONAL: the claw is a Slack bot and runs
+   fine without it. Use `ask_user_question` with these two choices:
+   - **Yes** — the claw authenticates `gh` automatically on every boot from
+     `/bclaw/GH_TOKEN_VAL` (the container `Command` runs
+     `gh auth login --with-token`). Requires creating that SSM parameter in
+     Phase 3 and passing `EnableGitHubKey=true` in Phase 2.
+   - **No** (default) — no GitHub credential is injected; `gh`/HTTPS-git
+     operations will be unauthenticated. The on-boot login is skipped
+     entirely (the `Command` guards on `$GH_TOKEN_VAL` being non-empty).
+
 Store them as shell variables used in every later command:
 
 ```bash
 CLAW_NAME=bclaw                              # the claw name (fixed at generation)
 AWS_REGION=<user-provided>
 INFER_PROVIDER=<openrouter|anthropic|zai>   # from step 2
+ENABLE_GH=<true|false>                      # from step 3 (default false)
 ```
 
 #### 1a. Probe ARM64-capable availability zones
@@ -221,10 +233,12 @@ yet, because the SSM secrets don't exist. This avoids the gateway crash-looping
 on missing env vars.
 
 Pass `--parameter-overrides` including the `Enable*Key=true` for the provider
-chosen in Phase 1 step 3 (`EnableOpenRouterKey` / `EnableAnthropicKey` /
+chosen in Phase 1 step 2 (`EnableOpenRouterKey` / `EnableAnthropicKey` /
 `EnableZaiKey`). Leave the other two at their template default `false` (omit
 them) so their secrets resolve to `AWS::NoValue` and the task doesn't try to
-fetch SSM parameters that don't exist:
+fetch SSM parameters that don't exist. If the user opted into GitHub auth in
+Phase 1 step 3 (`ENABLE_GH=true`), also pass `EnableGitHubKey=true` — otherwise
+omit it (default `false`, no `GH_TOKEN_VAL` injected, on-boot login skipped):
 
 ```bash
 aws cloudformation deploy \
@@ -237,20 +251,24 @@ aws cloudformation deploy \
     AZ1=<az1-from-phase-1> \
     AZ2=<az2-from-phase-1> \
     <EnableProviderKey>=true \
+    EnableGitHubKey="$ENABLE_GH" \
   --no-disable-rollback
 ```
 
 where `<EnableProviderKey>` is resolved from `$INFER_PROVIDER` per the Phase 1
 mapping (e.g. `EnableOpenRouterKey` for openrouter). If the user selected more
 than one provider in Phase 1, add each matching `Enable*Key=true` on its own
-line.
+line. `EnableGitHubKey="$ENABLE_GH"` is safe to always pass — it's `"true"` or
+`"false"` straight from Phase 1 step 3.
 
 > **On stack updates you MUST re-pass the provider key override.**
 > `cloudformation deploy` uses the template's parameter `Default` (`false`) for
 > any parameter omitted from `--parameter-overrides` — it does not remember the
 > prior stack's values. Forgetting to re-pass `EnableOpenRouterKey=true` on a
 > later update would silently drop the provider key from the task definition and
-> the gateway would come up with no model. Capture current params with
+> the gateway would come up with no model. The same applies to
+> `EnableGitHubKey`: omitting it on an update reverts GitHub auth to off, and
+> the next task quietly starts unauthenticated. Capture current params with
 > `describe-stacks` and re-pass them, then verify the live task def matches
 > intent — see `references/template-pitfalls.md`.
 
@@ -276,14 +294,15 @@ Confirm `ClusterName`, `ServiceName`, `EFSFileSystemId`, `KmsKeyArn`,
 **Gate: stack is `CREATE_COMPLETE`.**
 
 The claw needs SSM SecureString parameters under the `/bclaw/` namespace —
-**5 that are always required** (Slack + GitHub), plus **1 inference-provider
-key** chosen in Phase 1 step 3. The namespace is hardcoded in the template
+**4 that are always required** (Slack), plus an **optional GitHub key** (only
+if `ENABLE_GH=true` from Phase 1 step 3), plus **1 inference-provider key**
+chosen in Phase 1 step 2. The namespace is hardcoded in the template
 (not constructed from `ClawName`), which means the deployer's IAM policy can be
 scoped to `arn:aws:ssm:*:*:parameter/bclaw/*` instead of `*`. They are **not** created by CloudFormation — the user
-writes them here so they survive stack updates and deletes. The 5 Slack/GitHub
+writes them here so they survive stack updates and deletes. The 4 Slack
 secrets are unconditional in the task definition's `secrets[]` (the task will
-not start if any is missing); the provider key is injected only because its
-matching `Enable*Key=true` was passed in Phase 2.
+not start if any is missing); the GitHub and provider keys are injected only
+because their matching `Enable*Key=true` was passed in Phase 2.
 
 Use `ask_user_question` to give the user the tables below and tell them to enter
 each parameter in the **AWS Management Console** (Systems Manager → Application
@@ -292,7 +311,7 @@ confirmation. The console is the primary path: secret values stay out of the
 user's shell history and terminal scrollback (the console masks SecureString
 inputs).
 
-**Always required (5):**
+**Always required (4):**
 
 | SSM key | What it is | Where to find it |
 |---|---|---|
@@ -300,7 +319,14 @@ inputs).
 | `/bclaw/SLACK_APP_TOKEN` | Slack app-level token (`xapp-`, enables socket mode) | Slack app → Basic Information → App-Level Tokens |
 | `/bclaw/SLACK_ALLOWED_USERS` | Comma-separated Slack user IDs allowed to use the bot | Slack profile → "Copy member ID" |
 | `/bclaw/SLACK_HOME_CHANNEL` | Slack channel ID the bot treats as home | Right-click channel → "Copy link", take the trailing ID |
-| `/bclaw/GH_TOKEN_VAL` | GitHub PAT — used for on-boot `gh auth login` (see Phase 5a) | https://github.com/settings/tokens (classic PAT or fine-grained; needs the scopes the claw's `gh`/git usage requires) |
+
+**GitHub key (optional, from Phase 1 step 3):** create this only if
+`ENABLE_GH=true` — it authenticates `gh`/HTTPS-git on every boot. Skip this
+entire subsection if the user opted out.
+
+| SSM key | What it is | Where to find it |
+|---|---|---|
+| `/bclaw/GH_TOKEN_VAL` | GitHub PAT — used for on-boot `gh auth login` (see Phase 5a). Named `*_VAL`, not `GH_TOKEN`, to dodge `gh`'s reserved env var (see `references/on-boot-commands.md`) | https://github.com/settings/tokens (classic PAT or fine-grained; needs the scopes the claw's `gh`/git usage requires) |
 
 **Inference-provider key (1, from Phase 1 `$INFER_PROVIDER`):** create the one
 matching the chosen provider — this is the key the gateway uses as its model
@@ -330,11 +356,16 @@ For each parameter the user creates in the console, the settings are:
 >  aws ssm put-parameter --name "/bclaw/SLACK_BOT_TOKEN" \
 >    --type SecureString --key-id "alias/${CLAW_NAME}-ssm" \
 >    --value "<token>" --region "$AWS_REGION"
-> # repeat for the other 4 Slack/GitHub secrets + the provider key, substituting the real values
+> # repeat for the other 3 Slack secrets + the provider key (+ GH_TOKEN_VAL if
+> # ENABLE_GH=true), substituting the real values
 > ```
 
-**Gate: verify all 6 parameters exist before proceeding** (values not displayed) —
-the 5 Slack/GitHub secrets plus the provider key resolved from `$INFER_PROVIDER`:
+**Gate: verify all required parameters exist before proceeding** (values not
+displayed) — the 4 Slack secrets plus the provider key (plus `GH_TOKEN_VAL` iff
+`ENABLE_GH=true`). Only injected secrets must exist: the 4 Slack secrets are
+unconditional in `secrets[]`; the provider and GitHub keys are injected only
+because their matching `Enable*Key=true` was passed in Phase 2, so they're the
+only ones that need to be present:
 
 ```bash
 PROVIDER_KEY=$(case "$INFER_PROVIDER" in
@@ -343,14 +374,20 @@ PROVIDER_KEY=$(case "$INFER_PROVIDER" in
   zai)        echo ZAI_API_KEY ;;
 esac)
 
-for k in SLACK_BOT_TOKEN SLACK_APP_TOKEN SLACK_ALLOWED_USERS SLACK_HOME_CHANNEL GH_TOKEN_VAL "$PROVIDER_KEY"; do
+REQUIRED="SLACK_BOT_TOKEN SLACK_APP_TOKEN SLACK_ALLOWED_USERS SLACK_HOME_CHANNEL $PROVIDER_KEY"
+[ "$ENABLE_GH" = "true" ] && REQUIRED="$REQUIRED GH_TOKEN_VAL"
+
+for k in $REQUIRED; do
   aws ssm get-parameter --name "/bclaw/$k" \
     --region "$AWS_REGION" --query 'Parameter.Name' --output text 2>&1
 done
 ```
 
-All 6 must resolve successfully. If any returns `ParameterNotFound`, the task
-will fail to fetch it and crash-loop — do not proceed until all 6 exist.
+Every listed parameter must resolve successfully. If any returns
+`ParameterNotFound`, the task will fail to fetch it and crash-loop (this only
+applies to secrets that are actually injected — an opt-out key you never
+enabled is `AWS::NoValue` in the task def, so its absence is fine). Do not
+proceed until all of them exist.
 
 > **Note on migration from fly.io:** the secret *values* are the same — only
 > the storage location changes (fly secrets → SSM). The user can read each
@@ -362,7 +399,7 @@ will fail to fetch it and crash-loop — do not proceed until all 6 exist.
 
 ### Phase 4: Scale the service to 1 and verify
 
-**Gate: all 6 SSM parameters exist.**
+**Gate: all required SSM parameters exist.**
 
 Scale the service up. This starts the task; the ECS agent fetches the SSM
 parameters (via the execution role's `ssm:GetParameters` grant), decrypts them
@@ -424,9 +461,10 @@ aws logs tail "/ecs/${CLAW_NAME}" --region "$AWS_REGION" --follow
 
 Look for the Slack socket-mode connection succeeding (e.g. a "gateway started"
 or "slack connected" line). You may also see an early `[gh-auth] login failed
-(non-fatal)` line if the GitHub login didn't take — that's non-blocking (see
-Phase 5a to verify/fix). `Ctrl-C` to stop following once you see the gateway
-is up.
+(non-fatal)` line if the GitHub login didn't take (only when GitHub auth is
+enabled — `ENABLE_GH=true`; an opt-out claw logs nothing here) — that's
+non-blocking (see Phase 5a to verify/fix). `Ctrl-C` to stop following once you
+see the gateway is up.
 
 ---
 
@@ -434,8 +472,9 @@ is up.
 
 **Gate: task is `RUNNING` and gateway logs show a healthy connection.**
 
-The claw is now live. GitHub (`gh`) authentication is **automatic** — see
-Phase 5a below; there is no manual auth step. To shell into the container
+The claw is now live. GitHub (`gh`) authentication is **automatic on boot when
+enabled** (`ENABLE_GH=true`, Phase 1 step 3) — see Phase 5a below; there is no
+manual auth step. To shell into the container
 (uses SSM Session Manager under the hood — requires the [Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)
 locally):
 
@@ -456,23 +495,28 @@ aws ecs execute-command --cluster "$CLAW_NAME" --task "$TASK_ARN" \
 
 #### 5a. GitHub authentication (automatic on boot)
 
-`gh`/HTTPS-git authentication is **not** a manual step anymore. The task
-definition injects `GH_TOKEN_VAL` from the `/bclaw/GH_TOKEN_VAL` SSM parameter
-(required — see Phase 3) and the container `Command` runs, as the harness user
-on every boot:
+`gh`/HTTPS-git authentication is **not** a manual step — when GitHub auth is
+enabled (`ENABLE_GH=true`), the task definition injects `GH_TOKEN_VAL` from
+the `/bclaw/GH_TOKEN_VAL` SSM parameter and the container `Command` runs, as
+the harness user on every boot:
 
 ```
-printf "%s" "$GH_TOKEN_VAL" | gh auth login --with-token 2>&1 \
-  || echo "[gh-auth] login failed (non-fatal)"
+if [ -n "$GH_TOKEN_VAL" ]; then
+  printf "%s" "$GH_TOKEN_VAL" | gh auth login --with-token 2>&1 \
+    || echo "[gh-auth] login failed (non-fatal)"
+fi
 exec hermes gateway
 ```
 
-The login is **non-fatal**: if it fails (rejected token, GitHub outage), the
-failure is logged to CloudWatch as `[gh-auth] login failed (non-fatal)` and the
-gateway still starts — the Slack bot is the claw's primary function; `gh` is
-secondary. The session persists in `~/.config/gh` (on EFS), and the entrypoint's
-`setup-env.sh` has already seeded `GIT_CONFIG_GLOBAL` with the `gh auth
-git-credential` helper, so HTTPS git operations authenticate via the same token.
+The `if [ -n ... ]` guard means an opt-out claw (`ENABLE_GH=false`) skips the
+login entirely — `GH_TOKEN_VAL` is never injected, so there's no spurious
+`[gh-auth]` failure logged. The login is **non-fatal** when enabled: if it
+fails (rejected token, GitHub outage), the failure is logged to CloudWatch as
+`[gh-auth] login failed (non-fatal)` and the gateway still starts — the Slack
+bot is the claw's primary function; `gh` is secondary. The session persists in
+`~/.config/gh` (on EFS), and the entrypoint's `setup-env.sh` has already
+seeded `GIT_CONFIG_GLOBAL` with the `gh auth git-credential` helper, so HTTPS
+git operations authenticate via the same token.
 
 **Verify it worked** (from a root exec session):
 
@@ -506,9 +550,8 @@ Report to the user:
 
 - Claw name, region, inference provider, and the AZ the task landed in (with ARM64 confirmation)
 - Stack name and key outputs (cluster, EFS file system ID, SSM prefix)
-- The 6 SSM parameter locations (5 Slack/GitHub + the provider key — values never displayed)
-- GitHub auth is automatic on boot from `/bclaw/GH_TOKEN_VAL` (Phase 5a) — verify
-  with `runuser -u harness -- gh auth status` from an exec session
+- The SSM parameter locations (4 Slack + the provider key, plus `/bclaw/GH_TOKEN_VAL` if GitHub auth was enabled — values never displayed)
+- GitHub auth (if enabled) is automatic on boot from `/bclaw/GH_TOKEN_VAL` (Phase 5a) — verify with `runuser -u harness -- gh auth status` from an exec session; if disabled, `gh auth status` showing "not logged in" is expected
 - How to tail logs: `aws logs tail "/ecs/${CLAW_NAME}" --follow --region "$AWS_REGION"`
 - How to shell in: the `aws ecs execute-command` snippet from Phase 5
 - How to tear down: point at the `teardown-harness-ecs-fargate` skill
@@ -554,19 +597,21 @@ Report to the user:
   always run. The task definition sets no explicit `EntryPoint` (it's baked
   into the image) and no `LinuxParameters.InitProcessEnabled` (tini is the
   init — a second ECS init layer would be redundant). The `Command` wrapper is
-  `printf "%s" "$GH_TOKEN_VAL" | gh auth login --with-token 2>&1 || echo "[gh-auth] login failed (non-fatal)"; exec hermes gateway`,
+  `if [ -n "$GH_TOKEN_VAL" ]; then printf "%s" "$GH_TOKEN_VAL" | gh auth login --with-token 2>&1 || echo "[gh-auth] login failed (non-fatal)"; fi; exec hermes gateway`,
   which the entrypoint runs via its `exec "$@"`. The entrypoint runs first
   (sources `setup-env.sh` → routes `GIT_CONFIG_GLOBAL` into persisted
   `~/.config` and seeds the `gh auth git-credential` helper; seeds
   `config.yaml`), then `exec`s the wrapper as the harness user (uid 1000). The
   login is **non-fatal** — a failure (bad token, GitHub outage) is logged to
-  CloudWatch and the gateway still starts. `GH_TOKEN_VAL` is a **required** SSM
-  param (`/bclaw/GH_TOKEN_VAL`, unconditional in `secrets[]`), unlike the
+  CloudWatch and the gateway still starts. `GH_TOKEN_VAL` is an **optional**
+  SSM param (`/bclaw/GH_TOKEN_VAL`), gated behind the `EnableGitHubKey` stack
+  parameter (default `false`) — the same opt-in pattern as the
   inference-provider keys (`OPENROUTER_API_KEY`, `ZAI_API_KEY`,
-  `ANTHROPIC_API_KEY`), which are opt-in via the `EnableOpenRouterKey`/
-  `EnableZaiKey`/`EnableAnthropicKey` parameters (conditional `!If` entries
-  in `secrets[]` — exactly one is enabled per claw, chosen in Phase 1; see
-  the "Adding new SSM secrets" note below). The secret
+  `ANTHROPIC_API_KEY`), which use `EnableOpenRouterKey`/`EnableZaiKey`/
+  `EnableAnthropicKey` (conditional `!If` entries in `secrets[]`; exactly one
+  provider key is enabled per claw, chosen in Phase 1). When GitHub auth is
+  disabled, the `Command`'s `if [ -n "$GH_TOKEN_VAL" ]` guard skips the login
+  entirely and no `GH_TOKEN_VAL` is injected. The secret
   is named
   `GH_TOKEN_VAL`, **not** `GH_TOKEN`, deliberately: when the reserved `GH_TOKEN`
   env var is present, `gh auth login --with-token` refuses to store the token
@@ -639,15 +684,16 @@ Report to the user:
   `template.yaml`, then deploy a stack update. There are two patterns,
   both already used in the template:
 
-  - **Required (unconditional).** The 5 core secrets (SLACK_*, GH_TOKEN_VAL)
+  - **Required (unconditional).** The 4 core Slack secrets (SLACK_*)
     are plain entries — the task fails to start if any is missing:
     ```yaml
     - { Name: FOO_KEY, ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/bclaw/FOO_KEY" }
     ```
-  - **Optional (conditional).** The inference-provider keys
+  - **Optional (conditional).** `GH_TOKEN_VAL` and the inference-provider keys
     (`OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, `ZAI_API_KEY`) are gated behind
     an `Enable*Key` stack parameter so the template works without any given one.
-    Exactly one is enabled per claw (chosen in Phase 1). This needs three
+    Exactly one provider key is enabled per claw (chosen in Phase 1); GitHub auth
+    is opt-in via `EnableGitHubKey`. This needs three
     coordinated pieces: a `String` parameter (default `"false"`,
     `AllowedValues: ["true","false"]`), a `Conditions` entry
     (`FooKeyEnabled: !Equals [!Ref EnableFooKey, "true"]`), and a `!If` entry

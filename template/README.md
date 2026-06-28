@@ -167,8 +167,9 @@ scope, and the CloudFormation template — so the namespace matches the claw
 name. It is a literal in the template (not derived from the `ClawName` parameter
 at deploy time), which is what lets the IAM policy pin it to a fixed ARN prefix.
 You'll enter them in the AWS console during the setup skill (Phase 3) — they're
-not CloudFormation resources, so they survive stack updates and deletes. Five
-are always required; plus exactly one
+not CloudFormation resources, so they survive stack updates and deletes. Four
+are always required; a GitHub token is optional (enable it only if the agent
+should make authenticated `gh`/HTTPS-git calls); plus exactly one
 inference-provider key (you'll choose which in Phase 1 of the setup skill).
 Gather the values beforehand:
 
@@ -180,7 +181,17 @@ Gather the values beforehand:
 | `/bclaw/SLACK_APP_TOKEN` | Slack app-level token (`xapp-`, enables socket mode) | Slack app → Basic Information → App-Level Tokens |
 | `/bclaw/SLACK_ALLOWED_USERS` | Comma-separated Slack user IDs allowed to use the bot | Slack profile → "Copy member ID" |
 | `/bclaw/SLACK_HOME_CHANNEL` | Slack channel ID the bot treats as home | Right-click channel → "Copy link", take the trailing ID |
-| `/bclaw/GH_TOKEN_VAL` | GitHub PAT — on-boot `gh auth login` (see setup skill Phase 5a) | https://github.com/settings/tokens |
+
+### Optional: GitHub authentication
+
+Enable this (Phase 1 step 3 of the setup skill → `EnableGitHubKey=true`) only
+if the agent should make authenticated `gh`/HTTPS-git calls. When enabled, the
+container runs `gh auth login --with-token` on every boot; when disabled the
+login is skipped and no token is injected.
+
+| SSM key | What it is | Where to find it |
+|---|---|---|
+| `/bclaw/GH_TOKEN_VAL` | GitHub PAT — on-boot `gh auth login` (see setup skill Phase 5a). Named `*_VAL`, not `GH_TOKEN`, to avoid `gh`'s reserved env var | https://github.com/settings/tokens |
 
 ### Inference-provider key (choose one)
 

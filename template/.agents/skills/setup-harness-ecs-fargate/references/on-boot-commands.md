@@ -102,14 +102,16 @@ The wrapper wins: automatic, rotation-safe, no image build, single container.
 
 ## Worked example: on-boot GitHub auth (GH_TOKEN_VAL)
 
-The claw authenticates `gh` from a required SSM param on every boot:
+When GitHub auth is enabled (`EnableGitHubKey=true`), the claw authenticates
+`gh` from an SSM param on every boot. The `if [ -n ... ]` guard makes it a
+silent no-op when disabled (no `GH_TOKEN_VAL` injected, no `[gh-auth]` log):
 
 ```yaml
 # EntryPoint: NOT set — image's [/tini, --, /entrypoint.sh] runs from ENTRYPOINT
 Command:
   - sh
   - -c
-  - 'printf "%s" "$GH_TOKEN_VAL" | gh auth login --with-token 2>&1 || echo "[gh-auth] login failed (non-fatal)"; exec hermes gateway'
+  - 'if [ -n "$GH_TOKEN_VAL" ]; then printf "%s" "$GH_TOKEN_VAL" | gh auth login --with-token 2>&1 || echo "[gh-auth] login failed (non-fatal)"; fi; exec hermes gateway'
 ```
 
 ### Pitfall: the secret MUST be named GH_TOKEN_VAL, not GH_TOKEN
@@ -141,9 +143,12 @@ their env — they rely on the stored credential in `~/.config/gh/hosts.yml` (on
 EFS, persists across restarts). Without the stored credential, agent-initiated
 `gh`/git operations would fail authentication.
 
-`GH_TOKEN_VAL` is an unconditional entry in `secrets[]` (required — the task
-won't start without it, enforced at SSM-fetch time before the command runs).
-The gh session persists in `~/.config/gh` (EFS), and setup-env.sh has already
+`GH_TOKEN_VAL` is a **conditional** entry in `secrets[]` — present only when
+`EnableGitHubKey=true` (opt-in, the same pattern as the inference-provider
+keys); when disabled it resolves to `AWS::NoValue`, the task starts fine with
+no SSM param present, and the `Command`'s guard skips the login. The gh
+session persists in
+`~/.config/gh` (EFS), and setup-env.sh has already
 wired the `gh auth git-credential` helper into gitconfig, so HTTPS git
 operations use the same token. To rotate: `ssm put-parameter --overwrite` on
 `/bclaw/GH_TOKEN_VAL` then `update-service --force-new-deployment` (the boot

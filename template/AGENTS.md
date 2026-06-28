@@ -50,11 +50,11 @@ You can use web-search-prime to look things up that aren't obvious in the reposi
   explicitly after confirmation.
 - Secrets are **SSM SecureString** parameters under the claw's `/bclaw/KEY`
   namespace, written by the user in setup Phase 3 (piranesi pattern). Not
-  stack-owned, so they survive stack updates/deletes. 5 always-required params: `SLACK_BOT_TOKEN`,
-  `SLACK_APP_TOKEN`, `SLACK_ALLOWED_USERS`, `SLACK_HOME_CHANNEL`,
-  `GH_TOKEN_VAL` (the last feeds the on-boot `gh auth login --with-token`
-  in the container `Command` — see the setup skill). Plus exactly one opt-in
-  inference-provider key chosen at deploy time: `OPENROUTER_API_KEY`
+  stack-owned, so they survive stack updates/deletes. 4 always-required params: `SLACK_BOT_TOKEN`,
+  `SLACK_APP_TOKEN`, `SLACK_ALLOWED_USERS`, `SLACK_HOME_CHANNEL`. Plus opt-in keys
+  chosen at deploy time: `GH_TOKEN_VAL` (optional, `EnableGitHubKey` — feeds the
+  on-boot `gh auth login --with-token` in the container `Command`; skipped when
+  disabled), and exactly one inference-provider key: `OPENROUTER_API_KEY`
   (recommended), `ANTHROPIC_API_KEY`, or `ZAI_API_KEY`.
 - ECS service starts at `DesiredCount: 0`; the setup skill scales to 1 after
   the SSM params exist, so the gateway never crash-loops on missing env vars.

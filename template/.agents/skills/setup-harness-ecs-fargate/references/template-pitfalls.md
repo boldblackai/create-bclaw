@@ -225,14 +225,16 @@ aws cloudformation describe-stacks --stack-name "$CLAW_NAME" --region "$AWS_REGI
   --query 'Stacks[0].Parameters[].{Key:ParameterKey,Value:ParameterValue}' --output table
 
 # Then deploy, re-passing every non-default param — especially the enabled
-# provider key among EnableOpenRouterKey / EnableZaiKey / EnableAnthropicKey
-# (template default false) and any AZ/image/cpu overrides you set earlier
+# provider key among EnableOpenRouterKey / EnableZaiKey / EnableAnthropicKey,
+# plus EnableGitHubKey (all template default false) and any AZ/image/cpu
+# overrides you set earlier
 aws cloudformation deploy ... \
   --parameter-overrides \
     ClawName="$CLAW_NAME" HarnessImageTag=<tag> \
     CpuArchitecture=<arch> TaskCpu=<cpu> TaskMemory=<mem> \
     TimeZone=<tz> AZ1=<az1> AZ2=<az2> \
-    EnableOpenRouterKey=<true|false> EnableZaiKey=<true|false> EnableAnthropicKey=<true|false>
+    EnableOpenRouterKey=<true|false> EnableZaiKey=<true|false> EnableAnthropicKey=<true|false> \
+    EnableGitHubKey=<true|false>
 ```
 
 **Verify after every stack update that the live task def matches intent** —
@@ -248,7 +250,8 @@ Compare the output against what you intended to deploy. A reverted provider
 `Enable*Key` shows up here as the missing matching secret in `Secrets` —
 e.g. `EnableOpenRouterKey` → missing `OPENROUTER_API_KEY`,
 `EnableZaiKey` → missing `ZAI_API_KEY`, `EnableAnthropicKey` → missing
-`ANTHROPIC_API_KEY`. (General principle: when
+`ANTHROPIC_API_KEY`, `EnableGitHubKey` → missing `GH_TOKEN_VAL`. (General
+principle: when
 asked "is X deployed / applied?", query the live AWS resource
 (`describe-task-definition`, `describe-stack`, `describe-services`), never infer
 from the template file on disk — the two can diverge.)

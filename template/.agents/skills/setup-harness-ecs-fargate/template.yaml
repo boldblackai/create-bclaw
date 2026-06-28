@@ -105,10 +105,24 @@ Parameters:
       (requires the SSM parameter to exist). Defaults to "false" so the
       template works without an Anthropic key.
 
+  EnableGitHubKey:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Set to "true" to inject /bclaw/GH_TOKEN_VAL into the container env and
+      run the on-boot `gh auth login --with-token` from the container Command
+      (requires the SSM parameter to exist). Defaults to "false" — GitHub auth
+      is OPTIONAL: the claw is a Slack bot and runs fine without it. Enable it
+      only if the agent should make authenticated `gh`/HTTPS-git calls; when
+      disabled the on-boot Command skips the login entirely (no crash-loop, no
+      noisy [gh-auth] log line).
+
 Conditions:
   OpenRouterKeyEnabled: !Equals [!Ref EnableOpenRouterKey, "true"]
   ZaiKeyEnabled: !Equals [!Ref EnableZaiKey, "true"]
   AnthropicKeyEnabled: !Equals [!Ref EnableAnthropicKey, "true"]
+  GitHubKeyEnabled: !Equals [!Ref EnableGitHubKey, "true"]
 
 # ── Resources ───────────────────────────────────────────────────────────────
 #
@@ -331,7 +345,9 @@ Resources:
   #   /bclaw/SLACK_APP_TOKEN     — Slack app-level token (xapp-, socket mode)
   #   /bclaw/SLACK_ALLOWED_USERS — comma-separated Slack user IDs
   #   /bclaw/SLACK_HOME_CHANNEL  — Slack home channel ID
-  #   /bclaw/GH_TOKEN_VAL        — GitHub PAT (on-boot `gh auth login`, see
+  # Opt-in GitHub key (inject /bclaw/GH_TOKEN_VAL only when EnableGitHubKey=true,
+  # chosen at deploy time — see the !If entry in secrets[] below):
+  #   /bclaw/GH_TOKEN_VAL        — GitHub PAT for on-boot `gh auth login` (see
   #                                  the container Command below). Named
   #                                  *_VAL, not GH_TOKEN, to avoid colliding
   #                                  with gh's reserved env var (which makes
@@ -454,11 +470,16 @@ Resources:
           # ECS init layer on top of it would be redundant.
           #
           # This Command authenticates gh from the GH_TOKEN_VAL SSM secret on
-          # every boot — token-rotation-safe (update GH_TOKEN_VAL in SSM and
-          # the next task start re-runs the login). Non-fatal: a failed login
-          # is logged to CloudWatch and the gateway still starts (the Slack bot
-          # is the primary function; gh is a secondary tool). printf (not echo)
-          # avoids any token-prefix flag interpretation.
+          # every boot — but ONLY when EnableGitHubKey=true (the default is
+          # false; GitHub auth is optional). When disabled, ECS does not inject
+          # GH_TOKEN_VAL into the env, the `if [ -n "$GH_TOKEN_VAL" ]` guard is
+          # false, and the login is skipped entirely — no crash-loop, no noisy
+          # [gh-auth] log line. When enabled, the login is token-rotation-safe
+          # (update GH_TOKEN_VAL in SSM and the next task start re-runs it) and
+          # non-fatal: a failed login is logged to CloudWatch and the gateway
+          # still starts (the Slack bot is the primary function; gh is a
+          # secondary tool). printf (not echo) avoids any token-prefix flag
+          # interpretation.
           #
           # Why the secret is named GH_TOKEN_VAL, not GH_TOKEN: when the env var
           # `GH_TOKEN` is present, `gh auth login --with-token` refuses to store
@@ -474,7 +495,7 @@ Resources:
           Command:
             - sh
             - -c
-            - 'printf "%s" "$GH_TOKEN_VAL" | gh auth login --with-token 2>&1 || echo "[gh-auth] login failed (non-fatal)"; exec hermes gateway'
+            - 'if [ -n "$GH_TOKEN_VAL" ]; then printf "%s" "$GH_TOKEN_VAL" | gh auth login --with-token 2>&1 || echo "[gh-auth] login failed (non-fatal)"; fi; exec hermes gateway'
           User: "1000:1000"
           Environment:
             - { Name: TZ, Value: !Ref TimeZone }
@@ -486,7 +507,10 @@ Resources:
             - { Name: SLACK_APP_TOKEN,      ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/bclaw/SLACK_APP_TOKEN" }
             - { Name: SLACK_ALLOWED_USERS,  ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/bclaw/SLACK_ALLOWED_USERS" }
             - { Name: SLACK_HOME_CHANNEL,   ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/bclaw/SLACK_HOME_CHANNEL" }
-            - { Name: GH_TOKEN_VAL,         ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/bclaw/GH_TOKEN_VAL" }
+            - !If
+              - GitHubKeyEnabled
+              - { Name: GH_TOKEN_VAL, ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/bclaw/GH_TOKEN_VAL" }
+              - !Ref AWS::NoValue
             - !If
               - OpenRouterKeyEnabled
               - { Name: OPENROUTER_API_KEY, ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/bclaw/OPENROUTER_API_KEY" }
@@ -581,11 +605,12 @@ Outputs:
   SsmParameterPrefix:
     Value: "/bclaw"
     Description: >
-      SSM SecureString parameter namespace for this claw. The 5
+      SSM SecureString parameter namespace for this claw. The 4
       always-required params live here: SLACK_BOT_TOKEN, SLACK_APP_TOKEN,
-      SLACK_ALLOWED_USERS, SLACK_HOME_CHANNEL, GH_TOKEN_VAL. Plus exactly one
-      opt-in provider key (OPENROUTER_API_KEY, ANTHROPIC_API_KEY, or
-      ZAI_API_KEY) selected via the Enable*Key stack parameters.
+      SLACK_ALLOWED_USERS, SLACK_HOME_CHANNEL. Plus opt-in keys selected via
+      the Enable*Key stack parameters: GH_TOKEN_VAL (EnableGitHubKey) and
+      exactly one inference-provider key (OPENROUTER_API_KEY,
+      ANTHROPIC_API_KEY, or ZAI_API_KEY).
   KmsKeyArn:
     Value: !GetAtt SsmKmsKey.Arn
     Description: >
