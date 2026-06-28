@@ -1,14 +1,14 @@
 ---
-name: manage-harness-ecs-fargate
+name: manage-bclaw
 description: >
-  Manage a running ECS Fargate claw. Three modes: (1) Overlay — push the
-  repo's agent_home/ onto the claw's ~/.hermes (EFS-backed) to update config,
+  Manage a running ECS Fargate bclaw. Three modes: (1) Overlay — push the
+  repo's agent_home/ onto the bclaw's ~/.hermes (EFS-backed) to update config,
   skills, memories, system prompt, or personas without a redeploy (via ECS
-  Exec); (2) Run — execute arbitrary commands on the live claw for inspection,
+  Exec); (2) Run — execute arbitrary commands on the live bclaw for inspection,
   debugging, or one-off operations (via ECS Exec); (3) Upgrade image — roll
-  the running claw onto a new ghcr.io/boldblackai/harness tag by bumping the
+  the running bclaw onto a new ghcr.io/boldblackai/harness tag by bumping the
   HarnessImageTag stack parameter and redeploying (no image rebuild).
-  Companion to setup-harness-ecs-fargate / teardown-harness-ecs-fargate.
+  Companion to setup-bclaw / teardown-bclaw.
 ---
 
 # Manage Harness ECS Fargate
@@ -37,7 +37,7 @@ common case).
 ## Prerequisites
 
 1. **The claw is already set up and RUNNING.** This skill manages a live
-   claw; it does not create one (use `setup-harness-ecs-fargate` first).
+   claw; it does not create one (use `setup-bclaw` first).
    Verify the task is `RUNNING` in the first step of either mode.
 
 2. **ECS Exec permissions on the caller.** `aws ecs execute-command` uses SSM
@@ -539,7 +539,7 @@ Edit the `HarnessImageTag` default so the choice survives the next deploy — a
 version bump is just this edit plus the redeploy in Step 4, then commit:
 
 ```
-# .agents/skills/setup-harness-ecs-fargate/template.yaml
+# .agents/skills/setup-bclaw/template.yaml
 HarnessImageTag:
   Type: String
   Default: hermes-1.9.2     # ← was hermes-1.9.1
@@ -554,7 +554,7 @@ HarnessImageTag:
 
 ```bash
 aws cloudformation deploy \
-  --template-file .agents/skills/setup-harness-ecs-fargate/template.yaml \
+  --template-file .agents/skills/setup-bclaw/template.yaml \
   --stack-name "$CLAW_NAME" \
   --region "$AWS_REGION" \
   --capabilities CAPABILITY_NAMED_IAM \
@@ -669,8 +669,8 @@ If the new image is bad, re-run this mode with the previous tag
   presigned URL carries no credentials, so no task-role S3 permissions are
   needed.
 
-- **Companion skills.** `setup-harness-ecs-fargate` (create the claw),
-  `teardown-harness-ecs-fargate` (destroy it). This skill sits between them:
+- **Companion skills.** `setup-bclaw` (create the claw),
+  `teardown-bclaw` (destroy it). This skill sits between them:
   Modes 1 (Overlay) and 2 (Run) mutate or inspect the live claw without
   touching the CloudFormation stack or task definition; Mode 3 (Upgrade image)
   performs an in-place stack update that re-renders the task definition and

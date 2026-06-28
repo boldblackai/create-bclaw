@@ -28,9 +28,9 @@ You can use web-search-prime to look things up that aren't obvious in the reposi
 ## Deploy
 
 - Deploys to **AWS ECS Fargate**, managed by the
-  `setup-harness-ecs-fargate` / `teardown-harness-ecs-fargate` agent skills
+  `setup-bclaw` / `teardown-bclaw` agent skills
   in `.agents/skills/`. The CloudFormation template lives alongside the setup
-  skill at `.agents/skills/setup-harness-ecs-fargate/template.yaml`.
+  skill at `.agents/skills/setup-bclaw/template.yaml`.
 - No derived image is built. The signed upstream
   `ghcr.io/boldblackai/harness` image is deployed as-is — EFS supports the
   4-way mount layout directly, so no custom `Dockerfile`/`entrypoint.sh` are

@@ -1,12 +1,12 @@
 ---
-name: setup-harness-ecs-fargate
+name: setup-bclaw
 description: >
-  Bootstraps a Hermes Agent claw on AWS ECS Fargate from scratch to a running
+  Bootstraps a Hermes Agent bclaw on AWS ECS Fargate from scratch to a running
   gateway. Follows a gated sequence: probe ARM64 AZs → deploy CloudFormation
   (VPC, EFS, ECS service at DesiredCount 0 on the first deploy) → write SSM
   secrets → scale to 1
-  → verify. Use when setting up a new claw on AWS, migrating from fly.io, or
-  re-deploying after teardown. Companion to teardown-harness-ecs-fargate.
+  → verify. Use when setting up a new bclaw on AWS, migrating from fly.io, or
+  re-deploying after teardown. Companion to teardown-bclaw.
 ---
 
 # Setup Harness ECS Fargate
@@ -183,7 +183,7 @@ if there is none. Act on the result:
 | Result | State | What to do |
 |---|---|---|
 | `does not exist` error | Fresh — no prior attempt | Proceed to the deploy below (this is a `CREATE`). |
-| `CREATE_COMPLETE` / `UPDATE_COMPLETE` | Already fully deployed | This run is an in-place `UPDATE`, not a fresh deploy. Usually fine (e.g. pushing a `template.yaml` change). But if the user wanted a clean rebuild, run the `teardown-harness-ecs-fargate` skill first. Tell the user it's an update before deploying. |
+| `CREATE_COMPLETE` / `UPDATE_COMPLETE` | Already fully deployed | This run is an in-place `UPDATE`, not a fresh deploy. Usually fine (e.g. pushing a `template.yaml` change). But if the user wanted a clean rebuild, run the `teardown-bclaw` skill first. Tell the user it's an update before deploying. |
 | `ROLLBACK_COMPLETE` / `CREATE_FAILED` / `ROLLBACK_FAILED` | Half-started: a deploy failed and rolled back | **STOP.** The stack exists but is unusable — `deploy` will refuse to touch it. Tear it down (below), then re-run setup. |
 | `UPDATE_ROLLBACK_COMPLETE` / `UPDATE_FAILED` / `UPDATE_ROLLBACK_FAILED` | Half-started: an update on a good stack failed | **STOP.** Cleanest fix is `delete-stack` + redeploy; alternatively `continue-update-rollback` recovers the prior good state. |
 | `DELETE_IN_PROGRESS` | A teardown is mid-flight | **STOP.** Wait for it to finish (`stack-delete-complete` waiter), then re-check this step. |
@@ -192,7 +192,7 @@ if there is none. Act on the result:
 | `REVIEW_IN_PROGRESS` | A stack with a pending change set (rare for `deploy`) | **STOP.** `delete-stack` then redeploy. |
 
 **If the gate stopped on a half-started stack, never abandon it under the
-`bclaw` name.** Run the `teardown-harness-ecs-fargate` skill (it scales to 0
+`bclaw` name.** Run the `teardown-bclaw` skill (it scales to 0
 first, deletes the stack, and handles the retained-EFS + force-delete gotchas),
 or for a quick rollback cleanup:
 
@@ -250,7 +250,7 @@ omit it (default `false`, no `GH_TOKEN_VAL` injected, on-boot login skipped):
 
 ```bash
 aws cloudformation deploy \
-  --template-file .agents/skills/setup-harness-ecs-fargate/template.yaml \
+  --template-file .agents/skills/setup-bclaw/template.yaml \
   --stack-name "$CLAW_NAME" \
   --region "$AWS_REGION" \
   --capabilities CAPABILITY_NAMED_IAM \
@@ -574,7 +574,7 @@ Report to the user:
 - GitHub auth (if enabled) is automatic on boot from `/bclaw/GH_TOKEN_VAL` (Phase 5a) — verify with `runuser -u harness -- gh auth status` from an exec session; if disabled, `gh auth status` showing "not logged in" is expected
 - How to tail logs: `aws logs tail "/ecs/${CLAW_NAME}" --follow --region "$AWS_REGION"`
 - How to shell in: the `aws ecs execute-command` snippet from Phase 5
-- How to tear down: point at the `teardown-harness-ecs-fargate` skill
+- How to tear down: point at the `teardown-bclaw` skill
 
 ---
 

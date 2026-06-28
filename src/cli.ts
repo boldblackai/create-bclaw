@@ -107,7 +107,7 @@ function printNextSteps(name: string): void {
     `cd ${name}`,
     "mise install && mise trust",
     "follow README.md → Setup (IAM user, policy, .env, Slack app, secrets)",
-    "run the setup-harness-ecs-fargate skill to deploy",
+    `run the setup-${name} skill to deploy`,
   ];
   console.log("\nNext steps:");
   for (const s of steps) console.log(`  ${s}`);

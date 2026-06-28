@@ -73,7 +73,7 @@ condition that restricts to our resources only):
 - **Shell-in (ECS Exec) permissions are included.** The policy grants
   `ecs:ExecuteCommand` scoped to the bclaw cluster + tasks (`ECSExec`), plus the
   four `ssmmessages:*` channel actions (`SSMMessages`). These are needed by the
-  setup skill (Phase 5), teardown skill, and the `manage-harness-ecs-fargate`
+  setup skill (Phase 5), teardown skill, and the `manage-bclaw`
   skill. `ssmmessages:*` cannot be resource-scoped — see the "Why some resources
   stay `Resource: *`" table below.
 
@@ -221,7 +221,7 @@ It follows a gated sequence: probe ARM64 AZs → deploy CloudFormation (VPC, EFS
 ECS service at DesiredCount 0 on the first deploy) → write SSM secrets → scale
 to 1 → verify.
 
-`.agents/skills/setup-harness-ecs-fargate/SKILL.md`
+`.agents/skills/setup-bclaw/SKILL.md`
 
 The skill opens with a `simulate-principal-policy` pre-flight that checks the
 deployer principal has every action the stack needs. If it lists any `denied`
@@ -231,4 +231,4 @@ re-run.
 
 ## Tear down
 
-`.agents/skills/teardown-harness-ecs-fargate/SKILL.md`
+`.agents/skills/teardown-bclaw/SKILL.md`

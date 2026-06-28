@@ -9,7 +9,7 @@ Description: >
   service is a Slack socket-mode bot, so it is outbound-only — no load
   balancer, no inbound ports (the SG only allows self-referenced NFS for EFS).
 
-  Managed by the setup-harness-ecs-fargate / teardown-harness-ecs-fargate
+  Managed by the setup-bclaw / teardown-bclaw
   agent skills. See docs/deploying/aws.md (Option A) in the harness repo for
   the manual equivalent.
 

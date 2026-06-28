@@ -1,11 +1,11 @@
 ---
-name: teardown-harness-ecs-fargate
+name: teardown-bclaw
 description: >
-  Tears down a Hermes Agent claw on ECS Fargate and all associated AWS
+  Tears down a Hermes Agent bclaw on ECS Fargate and all associated AWS
   resources. Follows a reverse-order sequence: scale to 0 → delete
   CloudFormation stack (VPC, EFS, ECS, IAM) → delete SSM secrets. Use when
-  asked to destroy, teardown, or decommission the claw. Companion to
-  setup-harness-ecs-fargate.
+  asked to destroy, teardown, or decommission the bclaw. Companion to
+  setup-bclaw.
 ---
 
 # Teardown Harness ECS Fargate

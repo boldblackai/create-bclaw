@@ -1,7 +1,7 @@
 # agent_home/
 
 This directory is the **source of truth for curated claw state**. The
-`manage-harness-ecs-fargate` skill overlays its contents 1:1 onto the running
+`manage-bclaw` skill overlays its contents 1:1 onto the running
 claw's `/home/harness/.hermes/` (EFS-backed).
 
 ## What goes here
@@ -30,6 +30,6 @@ every update:
 
 ## How it's applied
 
-See `.agents/skills/manage-harness-ecs-fargate/SKILL.md`. The overlay is a merge
+See `.agents/skills/manage-bclaw/SKILL.md`. The overlay is a merge
 with overwrite: new files are added, changed files are overwritten, and files
 absent from here are preserved on the claw.

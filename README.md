@@ -22,12 +22,12 @@ walks you through creating and installing the Slack app into your workspace to g
 
 3. The generated repository is a set of skills, so open up `swe-pal` in your favorite harness ([Pi](https://boldblackai.github.io/harness/agents/pi/), [Hermes](https://boldblackai.github.io/harness/agents/hermes/), [OpenCode](https://boldblackai.github.io/harness/agents/opencode/))
 
-4. Run the `/setup-harness-ecs-fargate` skill. This will prompt you for an inference provider, it supports [OpenRouter](https://openrouter.ai/), [ZAI](https://z.ai/subscribe), and [Anthropic](https://www.anthropic.com/) out of the box, but trivial 
+4. Run the `/setup-bclaw` skill. This will prompt you for an inference provider, it supports [OpenRouter](https://openrouter.ai/), [ZAI](https://z.ai/subscribe), and [Anthropic](https://www.anthropic.com/) out of the box, but trivial 
 to use any that [hermes-agent already supports](https://hermes-agent.nousresearch.com/docs/integrations/providers/).
 
-5. To manage it (update running image version, update skills/SOUL.md, etc) you can use the `/manage-harness-ecs-fargate` skill.
+5. To manage it (update running image version, update skills/SOUL.md, etc) you can use the `/manage-bclaw` skill.
 
-6. To uninstall it, run the `/teardown-harness-ecs-fargate` skill.
+6. To uninstall it, run the `/teardown-bclaw` skill.
 
 ## What you get
 
