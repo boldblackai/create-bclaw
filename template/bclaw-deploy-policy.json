@@ -52,13 +52,13 @@
       }
     },
     {
-      "Sid": "EFSFileSystemManage",
+      "Sid": "EFSManage",
       "Effect": "Allow",
       "Action": [
         "elasticfilesystem:DeleteFileSystem",
         "elasticfilesystem:CreateMountTarget", "elasticfilesystem:DeleteMountTarget",
         "elasticfilesystem:DescribeMountTargets",
-        "elasticfilesystem:CreateAccessPoint",
+        "elasticfilesystem:CreateAccessPoint", "elasticfilesystem:DeleteAccessPoint",
         "elasticfilesystem:CreateTags", "elasticfilesystem:TagResource"
       ],
       "Resource": "*",
@@ -73,15 +73,6 @@
       "Resource": "*",
       "Condition": {
         "StringEquals": { "aws:RequestTag/Name": "bclaw-data" }
-      }
-    },
-    {
-      "Sid": "EFSAccessPointDelete",
-      "Effect": "Allow",
-      "Action": ["elasticfilesystem:DeleteAccessPoint"],
-      "Resource": "*",
-      "Condition": {
-        "StringEquals": { "aws:ResourceTag/Name": "bclaw-data" }
       }
     },
     {

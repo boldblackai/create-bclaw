@@ -64,9 +64,8 @@ condition that restricts to our resources only):
 
 | Statement | Condition | What it protects |
 |---|---|---|
-| `EFSFileSystemManage` | `aws:ResourceTag/Name = bclaw-data` | Can only delete/mutate the claw's own EFS file system + mount targets + create access points on it. Cannot touch any other EFS in the account. |
+| `EFSManage` | `aws:ResourceTag/Name = bclaw-data` | Can only delete/mutate the claw's own EFS file system + mount targets + access points (the template tags all 4 APs `Name=bclaw-data`). Cannot touch any other EFS in the account. |
 | `EFSFileSystemCreate` | `aws:RequestTag/Name = bclaw-data` | Can only create an EFS file system if it's tagged `Name=bclaw-data`. Prevents creating arbitrary EFS. |
-| `EFSAccessPointDelete` | `aws:ResourceTag/Name = bclaw-data` | Can only delete access points tagged `Name=bclaw-data` (the template tags all 4 APs). Cannot delete any other access point. |
 | `KMSUseKey` | `kms:ResourceAliases = alias/bclaw-ssm` | Can only Decrypt/Encrypt/ScheduleKeyDeletion on the claw's own CMK. Cannot use any other KMS key in the account. (Note: `kms:DescribeKey` and `kms:EnableKeyRotation` were moved to `KMSCreateKey` because the alias doesn't exist during key creation — see above.) |
 
 #### Notes
@@ -162,10 +161,14 @@ Slack generates separately (it can't live in the manifest):
 
 ## Secrets you'll need
 
-The claw needs SSM SecureString parameters under the static `/bclaw/`
-namespace (not the claw name). You'll enter them in the AWS console during the
-setup skill (Phase 3) — they're not CloudFormation resources, so they survive
-stack updates and deletes. Five are always required; plus exactly one
+The claw needs SSM SecureString parameters under the `/bclaw/` namespace. The
+scaffolder renames `bclaw` to your claw name everywhere — SSM paths, the IAM
+scope, and the CloudFormation template — so the namespace matches the claw
+name. It is a literal in the template (not derived from the `ClawName` parameter
+at deploy time), which is what lets the IAM policy pin it to a fixed ARN prefix.
+You'll enter them in the AWS console during the setup skill (Phase 3) — they're
+not CloudFormation resources, so they survive stack updates and deletes. Five
+are always required; plus exactly one
 inference-provider key (you'll choose which in Phase 1 of the setup skill).
 Gather the values beforehand:
 

@@ -1,11 +1,12 @@
 # IAM Permission Gaps and Template Fixes
 
-Lessons from a real deployment of the bclaw claw (June 2026). Each entry
-documents a gap discovered through iterative deployment failures, with the
-specific AWS error and the fix. The canonical policy in SKILL.md and the
-concrete copy at `/workspace/bclaw-deploy-policy.json` have been updated to
-include all these fixes — this file exists to explain *why* each permission
-and template fix is needed, so future sessions don't remove them.
+Lessons from a real deployment (June 2026), preserved as the template's
+authoritative "why" reference. Each entry documents a gap discovered through
+iterative deployment failures, with the specific AWS error and the fix. The
+canonical policy is `bclaw-deploy-policy.json` (shipped in the template; the
+scaffolder renames `bclaw` to the claw name) and includes all these fixes.
+This file exists to explain *why* each permission and template fix is needed,
+so future sessions don't remove them.
 
 ## IAM Policy Gaps (bclaw-deploy-policy.json)
 
@@ -172,7 +173,7 @@ time). IAM conditions combine with AND within a statement. Put both in one
 statement and a Create fails the `ResourceTag` check (no existing resource
 to read tags from) while a Delete fails the `RequestTag` check (no tags in a
 delete request). They MUST live in separate statements. This mirrors the
-existing `EFSFileSystemCreate` (RequestTag) / `EFSFileSystemManage`
+existing `EFSFileSystemCreate` (RequestTag) / `EFSManage`
 (ResourceTag) pair already in the policy.
 
 **WHY the prefix is `bclaw*` not `bclaw`.** The claw tags resources with
