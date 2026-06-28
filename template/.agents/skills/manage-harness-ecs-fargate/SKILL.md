@@ -1,29 +1,38 @@
 ---
 name: manage-harness-ecs-fargate
 description: >
-  Manage a running ECS Fargate claw via ECS Exec. Two modes: (1) Update —
-  overlay the repo's agent_home/ directory onto the claw's ~/.hermes
-  (EFS-backed) to push config, skills, memories, system prompt, or persona
-  changes without a full redeploy; (2) Run — execute arbitrary commands on
-  the live claw for inspection, debugging, or one-off operations. Companion
-  to setup-harness-ecs-fargate / teardown-harness-ecs-fargate.
+  Manage a running ECS Fargate claw. Three modes: (1) Overlay — push the
+  repo's agent_home/ onto the claw's ~/.hermes (EFS-backed) to update config,
+  skills, memories, system prompt, or personas without a redeploy (via ECS
+  Exec); (2) Run — execute arbitrary commands on the live claw for inspection,
+  debugging, or one-off operations (via ECS Exec); (3) Upgrade image — roll
+  the running claw onto a new ghcr.io/boldblackai/harness tag by bumping the
+  HarnessImageTag stack parameter and redeploying (no image rebuild).
+  Companion to setup-harness-ecs-fargate / teardown-harness-ecs-fargate.
 ---
 
 # Manage Harness ECS Fargate
 
-Manage a live ECS Fargate claw through ECS Exec (SSM Session Manager). This
-skill handles two related tasks:
+Manage a live ECS Fargate claw. This skill handles three related tasks:
 
-1. **Update** (default) — overlay the repo's `agent_home/` onto the claw's
-   `~/.hermes` to push curated state (config, skills, memories, prompts,
-   personas) without a CloudFormation redeploy or image rebuild.
+1. **Overlay** (default) — push the repo's `agent_home/` onto the claw's
+   `~/.hermes` to update curated state (config, skills, memories, prompts,
+   personas) without a CloudFormation redeploy or image rebuild. Transferred
+   over ECS Exec (SSM Session Manager).
 2. **Run** — execute arbitrary commands on the live claw: inspect files,
    check process state, run diagnostics, or perform one-off operations like
-   deleting a file that was removed from `agent_home/`.
+   deleting a file that was removed from `agent_home/`. Also over ECS Exec.
+3. **Upgrade image** — roll the running claw onto a new
+   `ghcr.io/boldblackai/harness` tag by bumping the `HarnessImageTag` stack
+   parameter and redeploying. No image rebuild (the signed upstream image is
+   used as-is); ECS performs a rolling deployment. This is a CloudFormation
+   stack update, not an ECS Exec operation.
 
-Both modes share the same prerequisites and ECS Exec transport. Determine
-which mode the user needs from context, or ask. When in doubt, default to
-**Update** (the common case).
+Modes 1 and 2 share the same prerequisites and ECS Exec transport (the
+"Shared first step" below). Mode 3 needs the same shell state and a RUNNING
+service but does not use the exec session. Determine which mode the user
+needs from context, or ask. When in doubt, default to **Overlay** (the
+common case).
 
 ## Prerequisites
 
@@ -127,7 +136,7 @@ missing "Session Manager plugin", install it (Prerequisites §3).
 
 ---
 
-## Mode 1: Update — overlay agent_home/
+## Mode 1: Overlay — push agent_home/ onto ~/.hermes
 
 Overlays the repo's `agent_home/` directory onto the running claw's
 `/home/harness/.hermes` — the EFS-backed home directory that persists config,
@@ -451,6 +460,151 @@ through `sed 's/\r$//'`.
 
 ---
 
+## Mode 3: Upgrade the running image
+
+Roll the running claw onto a new `ghcr.io/boldblackai/harness` tag. The image
+tag is a CloudFormation parameter (`HarnessImageTag`, default e.g.
+`hermes-1.9.1`); bumping it and redeploying creates a new task-definition
+revision and ECS rolls the task — **no image rebuild** (the signed upstream
+image is used as-is). EFS-backed state (sessions, memories, `~/.config/gh`)
+survives the roll; only the container image changes.
+
+**Gate: shell state active (mise + direnv + AWS creds); `CLAW_NAME` +
+`AWS_REGION` collected and the service is `RUNNING` (shared first step, up to
+the RUNNING check).** Mode 3 is a CloudFormation stack update — it does not
+need the ECS Exec session, the Session Manager plugin, or `TASK_ARN`.
+
+### Step 1: Capture the current tag and choose the target
+
+What's running now (from the live task — no exec needed):
+
+```bash
+aws ecs describe-tasks --cluster "$CLAW_NAME" \
+  --tasks "$(aws ecs list-tasks --cluster "$CLAW_NAME" --region "$AWS_REGION" \
+    --query 'taskArns[0]' --output text)" \
+  --region "$AWS_REGION" \
+  --query 'tasks[0].containers[0].image' --output text
+# → ghcr.io/boldblackai/harness:hermes-1.9.1
+```
+
+And what the stack is parameterized with:
+
+```bash
+aws cloudformation describe-stacks --stack-name "$CLAW_NAME" --region "$AWS_REGION" \
+  --query 'Stacks[0].Parameters[?ParameterKey==`HarnessImageTag`].ParameterValue' \
+  --output text
+```
+
+Tags are `hermes-X.Y.Z`. If the user doesn't already know the target, discover
+the latest published tags from the ghcr package (needs `gh` auth):
+
+```bash
+gh api /orgs/boldblackai/packages/container/harness/versions \
+  --jq '[.[].metadata.container.tags[]?] | map(select(startswith("hermes-"))) | sort | reverse | .[0:5][]'
+```
+
+Falls back to the GitHub Releases page if `gh` isn't authed.
+
+**Gate:** use `ask_user_question` to confirm the target tag with the user
+before proceeding.
+
+### Step 2: Capture the current non-default parameters (critical)
+
+`cloudformation deploy` applies the template `Default` to every parameter
+omitted from `--parameter-overrides` — it does **not** remember the prior
+stack's values. Several of this stack's parameters default to `false` /
+placeholder AZs, so omitting them silently reverts: the provider key drops
+(gateway comes up with no model), GitHub auth turns off, the AZs revert to
+placeholders.
+
+Capture every current parameter as `Key=Value` (excluding `HarnessImageTag`,
+which we're changing) into a reusable list:
+
+```bash
+OVERRIDES=$(aws cloudformation describe-stacks --stack-name "$CLAW_NAME" \
+  --region "$AWS_REGION" \
+  --query "Stacks[0].Parameters[?ParameterKey!='HarnessImageTag'].join('=', [ParameterKey, ParameterValue])" \
+  --output text | tr '\t' '\n')
+echo "$OVERRIDES"
+```
+
+> Every value in this stack's parameters is a bare token (claw name, AZ, a
+> `true`/`false`, a number, an image tag) — no embedded spaces — so the
+> unquoted `$OVERRIDES` expansion below is word-split into one `Key=Value`
+> per arg, which is exactly what `--parameter-overrides` expects.
+
+### Step 3: Persist the new tag in the repo
+
+Edit the `HarnessImageTag` default so the choice survives the next deploy — a
+version bump is just this edit plus the redeploy in Step 4, then commit:
+
+```
+# .agents/skills/setup-harness-ecs-fargate/template.yaml
+HarnessImageTag:
+  Type: String
+  Default: hermes-1.9.2     # ← was hermes-1.9.1
+```
+
+> To roll without touching the repo, skip this edit and add
+> `HarnessImageTag=<new-tag>` to the overrides in Step 4 — but the next
+> `cloudformation deploy` run from the repo reverts it. Persisting in the
+> template is the recommended path.
+
+### Step 4: Redeploy with the new tag (re-passing current params)
+
+```bash
+aws cloudformation deploy \
+  --template-file .agents/skills/setup-harness-ecs-fargate/template.yaml \
+  --stack-name "$CLAW_NAME" \
+  --region "$AWS_REGION" \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --parameter-overrides $OVERRIDES HarnessImageTag=hermes-1.9.2
+```
+
+> If you edited the `Default` in Step 3, passing `HarnessImageTag` here is
+> optional (the new default applies) — but passing it explicitly is harmless
+> and self-documenting, so prefer it.
+
+This creates a new task-definition revision (the image changed) and ECS begins
+a rolling deployment: start a replacement task, wait for `RUNNING`, then drain
+and stop the old task.
+
+### Step 5: Wait for the roll, then verify
+
+```bash
+aws ecs wait services-stable --cluster "$CLAW_NAME" --services "$CLAW_NAME" \
+  --region "$AWS_REGION"
+```
+
+`services-stable` blocks until `runningCount == desiredCount` (new task
+RUNNING, old drained). First pull of a new tag takes 2–3 min (image layer
+download); faster if layers are cached.
+
+Confirm the new image is live:
+
+```bash
+TASK_ARN=$(aws ecs list-tasks --cluster "$CLAW_NAME" --region "$AWS_REGION" \
+  --query 'taskArns[0]' --output text)
+aws ecs describe-tasks --cluster "$CLAW_NAME" --tasks "$TASK_ARN" \
+  --region "$AWS_REGION" \
+  --query 'tasks[0].{Image:containers[0].image, Status:lastStatus, StartedAt:startedAt}' \
+  --output table
+```
+
+Expect `Image` ending in `:hermes-1.9.2`, `Status = RUNNING`. Tail the gateway
+log to confirm the bot reconnected:
+
+```bash
+aws logs tail "/ecs/${CLAW_NAME}" --region "$AWS_REGION" --follow
+```
+
+### Rollback
+
+If the new image is bad, re-run this mode with the previous tag
+(`HarnessImageTag=<old-tag>`). EFS state survives — only the image rolls back.
+
+---
+
 ## Notes
 
 - **Exec runs as root.** `aws ecs execute-command` opens a **root** shell (see
@@ -500,7 +654,7 @@ through `sed 's/\r$//'`.
   env-driven keys (API keys, Slack config), update the SSM parameters instead
   (see the setup skill's Phase 3 / Phase 5a token-rotation recipe).
 
-- **Idempotent.** Running the update mode twice with the same `agent_home/` is a
+- **Idempotent.** Running the overlay mode twice with the same `agent_home/` is a
   no-op (identical files overwrite themselves). Safe to re-run after fixing a
   typo.
 
@@ -516,6 +670,19 @@ through `sed 's/\r$//'`.
   needed.
 
 - **Companion skills.** `setup-harness-ecs-fargate` (create the claw),
-  `teardown-harness-ecs-fargate` (destroy it). This skill sits between them: it
-  mutates or inspects the live claw without touching the CloudFormation stack
-  or the task definition.
+  `teardown-harness-ecs-fargate` (destroy it). This skill sits between them:
+  Modes 1 (Overlay) and 2 (Run) mutate or inspect the live claw without
+  touching the CloudFormation stack or task definition; Mode 3 (Upgrade image)
+  performs an in-place stack update that re-renders the task definition and
+  triggers an ECS rolling deployment.
+
+- **Image upgrades are stack updates, not overlays.** Mode 3 bumps
+  `HarnessImageTag` (a CloudFormation parameter, default e.g. `hermes-1.9.1`)
+  and redeploys, creating a new task-definition revision; ECS rolls the task.
+  It does not touch EFS state — sessions, memories, and `~/.config/gh` survive.
+  Persist the new tag by editing the `Default` in the repo's `template.yaml`
+  (commit it like any version bump), or pass it as a one-off
+  `--parameter-overrides` value. On any stack update you MUST re-pass every
+  non-default parameter (provider key, `EnableGitHubKey`, AZs, `DesiredCount`)
+  — `cloudformation deploy` applies template defaults to omitted ones, so
+  forgetting `EnableOpenRouterKey=true` silently drops the model key.
