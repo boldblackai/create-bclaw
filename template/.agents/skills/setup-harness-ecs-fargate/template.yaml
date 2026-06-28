@@ -118,6 +118,23 @@ Parameters:
       disabled the on-boot Command skips the login entirely (no crash-loop, no
       noisy [gh-auth] log line).
 
+  DesiredCount:
+    Type: Number
+    Default: 1
+    MinValue: 0
+    Description: >
+      Desired task count for the ECS service. Defaults to 1 so a stack update
+      that omits this parameter keeps the claw running instead of scaling it to
+      0 and silently taking it down (aws cloudformation deploy applies the
+      template Default to any parameter not in --parameter-overrides — it does
+      NOT remember the prior stack's value). On a FIRST deploy the setup skill
+      passes DesiredCount=0: the SSM secrets don't exist yet, so starting at 1
+      would make ECS fail to fetch the unconditional Slack secrets and repeatedly
+      fail placement (crash-loop); it then scales to 1 once the secrets exist. On
+      updates the skill re-passes the live service's actual count. Teardown stops
+      the task directly via `aws ecs update-service --desired-count 0`, not via
+      this parameter.
+
 Conditions:
   OpenRouterKeyEnabled: !Equals [!Ref EnableOpenRouterKey, "true"]
   ZaiKeyEnabled: !Equals [!Ref EnableZaiKey, "true"]
@@ -335,9 +352,12 @@ Resources:
   #
   # The task definition's `secrets[]` below references the SSM parameters by
   # constructed ARN, and the execution role is granted ssm:GetParameters
-  # scoped to the claw's parameter prefix. The service starts at DesiredCount
-  # 0; the skill scales it to 1 only after the SSM parameters exist —
-  # otherwise the task would fail to fetch them and crash-loop.
+  # scoped to the claw's parameter prefix. DesiredCount is a parameter
+  # (default 1): on a FIRST deploy the skill passes DesiredCount=0 so the task
+  # doesn't start before the SSM parameters exist (it would crash-loop on the
+  # missing env vars), then scales to 1. The default is 1, not 0, deliberately
+  # — a stack update that forgets to re-pass it keeps the claw running instead
+  # of silently scaling it to 0 (see references/template-pitfalls.md §7).
   #
   # The claw is a Slack socket-mode bot (see README + slack-manifest.json).
   # Always-required parameters (unconditional in secrets[]):
@@ -556,7 +576,7 @@ Resources:
             TransitEncryption: ENABLED
             AuthorizationConfig: { AccessPointId: !Ref MiseStateAccessPoint, IAM: DISABLED }
 
-  # ── Service: starts at DesiredCount 0; skill scales to 1 after secrets ─────
+  # ── Service: DesiredCount is a !Ref (default 1); first deploy passes 0 ──────
 
   Service:
     Type: AWS::ECS::Service
@@ -564,7 +584,7 @@ Resources:
       ServiceName: !Ref ClawName
       Cluster: !Ref Cluster
       TaskDefinition: !Ref TaskDefinition
-      DesiredCount: 0
+      DesiredCount: !Ref DesiredCount
       LaunchType: FARGATE
       EnableExecuteCommand: true
       NetworkConfiguration:

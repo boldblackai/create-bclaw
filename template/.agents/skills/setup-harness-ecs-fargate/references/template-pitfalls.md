@@ -119,21 +119,34 @@ deploy failures. All are now included:
 
 ## 7. Stack updates reset DesiredCount to 0
 
-The template hardcodes `DesiredCount: 0` on the ECS service — this is
-intentional for initial deploy (prevents crash-looping before SSM secrets
-exist, see Phase 3/4). But on a **stack update** (e.g. adding a new secret to
-the task definition), CloudFormation reverts the running count to 0, stopping
-the live task.
+The ECS service's `DesiredCount` was hardcoded to `0` — intentional for the
+initial deploy (prevents crash-looping before the SSM secrets exist, see
+Phase 3/4), but on a **stack update** CloudFormation re-applied that `0`,
+reverting the running count and silently stopping the live task. A real deploy
+hit exactly this: a stack update scaled a healthy claw to 0, noticed only
+because the bot went silent.
 
-**Workaround:** After any stack update, re-scale to 1:
+**Fix (implemented):** `DesiredCount` is now a CloudFormation parameter with
+`Default: 1`, referenced from the service as `!Ref DesiredCount`. The default
+is `1`, not `0`, deliberately — `cloudformation deploy` applies the template
+`Default` to any parameter omitted from `--parameter-overrides`, so a default
+of `1` means a stack update that forgets to re-pass it keeps the claw running
+instead of taking it down. (The earlier "future fix" proposed default 0;
+that does not solve the footgun — a bare update would still scale to 0.) The
+only place `0` is wanted is the first deploy, which the setup skill passes
+explicitly (`DesiredCount=0`); teardown stops the task directly via
+`aws ecs update-service --desired-count 0`, not via this parameter.
+
+**On updates, re-pass the live count** (not a fixed 1) so a user-scaled count
+survives:
 ```bash
-aws ecs update-service --cluster "$CLAW_NAME" --service "$CLAW_NAME" \
-  --desired-count 1 --region "$AWS_REGION"
+DESIRED=$(aws ecs describe-services --cluster "$CLAW_NAME" --services "$CLAW_NAME" \
+  --region "$AWS_REGION" --query 'services[0].desiredCount' --output text)
+# add  DesiredCount="$DESIRED"  to --parameter-overrides
 ```
-Then wait for RUNNING (`aws ecs wait tasks-running ...`).
 
-**Future fix:** Make `DesiredCount` a CloudFormation parameter (default 0,
-override to 1 on updates via `--parameter-overrides DesiredCount=1`).
+`scripts/validate-template.py` guards against regression — it fails if the
+service's `DesiredCount` is a hardcoded literal instead of `!Ref DesiredCount`.
 
 ## 8. Debugging: use `create-change-set` when `deploy` gives cryptic errors
 
@@ -226,15 +239,16 @@ aws cloudformation describe-stacks --stack-name "$CLAW_NAME" --region "$AWS_REGI
 
 # Then deploy, re-passing every non-default param — especially the enabled
 # provider key among EnableOpenRouterKey / EnableZaiKey / EnableAnthropicKey,
-# plus EnableGitHubKey (all template default false) and any AZ/image/cpu
-# overrides you set earlier
+# plus EnableGitHubKey (all template default false), DesiredCount (re-pass the
+# live count from describe-services, §7), and any AZ/image/cpu overrides you
+# set earlier
 aws cloudformation deploy ... \
   --parameter-overrides \
     ClawName="$CLAW_NAME" HarnessImageTag=<tag> \
     CpuArchitecture=<arch> TaskCpu=<cpu> TaskMemory=<mem> \
     TimeZone=<tz> AZ1=<az1> AZ2=<az2> \
     EnableOpenRouterKey=<true|false> EnableZaiKey=<true|false> EnableAnthropicKey=<true|false> \
-    EnableGitHubKey=<true|false>
+    EnableGitHubKey=<true|false> DesiredCount=<live count>  # re-pass the running count (§7)
 ```
 
 **Verify after every stack update that the live task def matches intent** —

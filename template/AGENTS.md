@@ -56,8 +56,11 @@ You can use web-search-prime to look things up that aren't obvious in the reposi
   on-boot `gh auth login --with-token` in the container `Command`; skipped when
   disabled), and exactly one inference-provider key: `OPENROUTER_API_KEY`
   (recommended), `ANTHROPIC_API_KEY`, or `ZAI_API_KEY`.
-- ECS service starts at `DesiredCount: 0`; the setup skill scales to 1 after
-  the SSM params exist, so the gateway never crash-loops on missing env vars.
+- The ECS service's `DesiredCount` is a parameter (default `1`); the setup skill
+  passes `0` on the first deploy (before the SSM params exist, so the gateway
+  doesn't crash-loop on missing env vars) then scales to 1. The default is `1`
+  so a stack update that omits it keeps the claw running instead of taking it
+  down.
 - `EnableExecuteCommand: true` → shell-in via `aws ecs execute-command` (SSM
   Session Manager). Exec sessions run as **root**; use
   `runuser -u harness --` to act as the workload user (uid 1000).

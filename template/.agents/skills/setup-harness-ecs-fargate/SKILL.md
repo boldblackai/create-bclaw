@@ -3,7 +3,8 @@ name: setup-harness-ecs-fargate
 description: >
   Bootstraps a Hermes Agent claw on AWS ECS Fargate from scratch to a running
   gateway. Follows a gated sequence: probe ARM64 AZs → deploy CloudFormation
-  (VPC, EFS, ECS service at DesiredCount 0) → write SSM secrets → scale to 1
+  (VPC, EFS, ECS service at DesiredCount 0 on the first deploy) → write SSM
+  secrets → scale to 1
   → verify. Use when setting up a new claw on AWS, migrating from fly.io, or
   re-deploying after teardown. Companion to teardown-harness-ecs-fargate.
 ---
@@ -18,7 +19,10 @@ allows self-referenced NFS for EFS).
 The CloudFormation stack (`template.yaml` alongside this skill) owns the VPC,
 EFS file system + 4 access points (one per persisted path, mirroring the
 harness CLI bind-mounts), IAM roles, log group, task definition, and an ECS
-service that starts at DesiredCount 0. Secrets are **not** owned by the stack —
+service whose `DesiredCount` is a parameter (default `1`); the setup skill
+passes `0` on the first deploy — before the SSM secrets exist, so the task
+doesn’t crash-loop on missing env vars — then scales to 1. Secrets are **not**
+owned by the stack —
 they live in SSM Parameter Store as namespaced SecureStrings that the user
 writes in Phase 3. This is the piranesi pattern: it keeps secrets out of
 template diffs and lets them survive stack deletes.
@@ -149,7 +153,7 @@ Report the chosen AZs to the user before proceeding.
 
 ---
 
-### Phase 2: Deploy the CloudFormation stack (DesiredCount 0)
+### Phase 2: Deploy the CloudFormation stack (first deploy at DesiredCount 0)
 
 **Gate: Phase 1 collected the AWS region, inference provider, and AZ1/AZ2; AND
 2-pre found no half-started stack** (`describe-stacks` returns `does not exist`
@@ -228,9 +232,13 @@ Only proceed to the deploy once this step reports `does not exist` (fresh
 
 #### 2-deploy: Create / update the stack
 
-Deploy the stack. It comes up with `DesiredCount: 0` — the task does NOT start
-yet, because the SSM secrets don't exist. This avoids the gateway crash-looping
-on missing env vars.
+Deploy the stack. On a **first deploy** (2-pre reported `does not exist`) pass
+`DesiredCount=0`: the task must NOT start yet, because the SSM secrets don’t
+exist — starting at 1 would make ECS fail to fetch the unconditional Slack
+secrets and repeatedly fail placement (crash-loop). Phase 4 scales it to 1 once
+the secrets exist. On a **stack update** (2-pre reported `CREATE_COMPLETE` /
+`UPDATE_COMPLETE`) pass the live service’s actual count instead — see the note
+after the command.
 
 Pass `--parameter-overrides` including the `Enable*Key=true` for the provider
 chosen in Phase 1 step 2 (`EnableOpenRouterKey` / `EnableAnthropicKey` /
@@ -252,6 +260,7 @@ aws cloudformation deploy \
     AZ2=<az2-from-phase-1> \
     <EnableProviderKey>=true \
     EnableGitHubKey="$ENABLE_GH" \
+    DesiredCount=0 \
   --no-disable-rollback
 ```
 
@@ -261,16 +270,27 @@ than one provider in Phase 1, add each matching `Enable*Key=true` on its own
 line. `EnableGitHubKey="$ENABLE_GH"` is safe to always pass — it's `"true"` or
 `"false"` straight from Phase 1 step 3.
 
-> **On stack updates you MUST re-pass the provider key override.**
-> `cloudformation deploy` uses the template's parameter `Default` (`false`) for
-> any parameter omitted from `--parameter-overrides` — it does not remember the
-> prior stack's values. Forgetting to re-pass `EnableOpenRouterKey=true` on a
-> later update would silently drop the provider key from the task definition and
-> the gateway would come up with no model. The same applies to
-> `EnableGitHubKey`: omitting it on an update reverts GitHub auth to off, and
-> the next task quietly starts unauthenticated. Capture current params with
-> `describe-stacks` and re-pass them, then verify the live task def matches
-> intent — see `references/template-pitfalls.md`.
+> **On a stack UPDATE, re-pass every non-default parameter — including
+> DesiredCount.** `cloudformation deploy` applies the template’s parameter
+> `Default` to anything omitted from `--parameter-overrides`; it does NOT
+> remember the prior stack’s values. `DesiredCount` defaults to `1` (chosen so a
+> forgotten override keeps the claw running instead of scaling it to 0), but to
+> preserve a count the user changed (e.g. scaled to 2), capture the live value
+> and re-pass it:
+>
+> ```bash
+> # current desired count of the running service
+> DESIRED=$(aws ecs describe-services --cluster "$CLAW_NAME" --services "$CLAW_NAME" \
+>   --region "$AWS_REGION" --query 'services[0].desiredCount' --output text)
+> # then add  DesiredCount="$DESIRED"  to --parameter-overrides on the deploy
+> ```
+>
+> The provider-key and GitHub overrides are stricter — their default is `false`,
+> so omitting them reverts silently: forgetting to re-pass
+> `EnableOpenRouterKey=true` drops the provider key and the gateway comes up
+> with no model; omitting `EnableGitHubKey` reverts GitHub auth to off. Capture
+> current params with `describe-stacks` and re-pass them, then verify the live
+> task def matches intent — see `references/template-pitfalls.md` §7 and §10.
 
 Wait for `CREATE_COMPLETE` (the `deploy` command blocks until it finishes).
 

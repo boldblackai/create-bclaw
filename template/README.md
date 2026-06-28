@@ -218,7 +218,8 @@ task crash-loops. In the console's KMS key picker, type `alias/bclaw-ssm`
 ### 4. Run the setup skill
 
 It follows a gated sequence: probe ARM64 AZs → deploy CloudFormation (VPC, EFS,
-ECS service at DesiredCount 0) → write SSM secrets → scale to 1 → verify.
+ECS service at DesiredCount 0 on the first deploy) → write SSM secrets → scale
+to 1 → verify.
 
 `.agents/skills/setup-harness-ecs-fargate/SKILL.md`
 
