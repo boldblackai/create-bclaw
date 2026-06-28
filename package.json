@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "description": "Scaffold a renamed Hermes Agent claw (Slack socket-mode bot on AWS ECS Fargate).",
   "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
   "bin": {
     "create-bclaw": "dist/cli.js"
   },
