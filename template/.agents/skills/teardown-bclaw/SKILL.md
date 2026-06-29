@@ -3,7 +3,8 @@ name: teardown-bclaw
 description: >
   Tears down a Hermes Agent bclaw on ECS Fargate and all associated AWS
   resources. Follows a reverse-order sequence: scale to 0 → delete
-  CloudFormation stack (VPC, EFS, ECS, IAM) → delete SSM secrets. Use when
+  CloudFormation stack → delete retained EFS → delete orphaned VPC → delete
+  SSM secrets. Use when
   asked to destroy, teardown, or decommission the bclaw. Companion to
   setup-bclaw.
 ---
@@ -13,9 +14,11 @@ description: >
 Tears down a Hermes Agent claw on ECS Fargate. Follows the reverse order of
 setup so dependencies delete cleanly without orphans. The CloudFormation stack
 owns the VPC, EFS, ECS service/task/cluster, IAM roles, and log group —
-deleting the stack removes all of them. EFS data is retained by the stack's
-`DeletionPolicy: Retain` and must be deleted explicitly. SSM secrets are not
-stack-owned and are deleted separately.
+deleting the stack removes all of them. Two resources survive a stack delete
+and need explicit cleanup: EFS data is retained by `DeletionPolicy: Retain`
+(Phase 3), and the VPC plus networking can be skipped when the stack delete
+hits `FORCE_DELETE_STACK` (Phase 4). SSM secrets are not stack-owned and are
+deleted separately.
 
 ## Prerequisites
 
@@ -63,7 +66,7 @@ aws sts get-caller-identity --query 'Arn' --output text
 ```
 
 Teardown is self-correcting: a failed delete leaves the resource behind and
-Phase 5's verification catches any leftovers, so real permission gaps surface
+Phase 6's verification catches any leftovers, so real permission gaps surface
 as the phases run rather than up front.
 
 ---
@@ -120,7 +123,9 @@ aws ecs stop-task \
 Delete the stack. This removes the service, task definition family's inactive
 revisions, cluster, IAM roles (exec + task), log group, EFS access points +
 mount targets + file system (subject to the retain policy — see Phase 3),
-security group, subnets, route table, internet gateway, and VPC.
+security group, subnets, route table, internet gateway, and VPC. If the stack
+delete skipped the networking (the `FORCE_DELETE_STACK` path can, when EFS
+mount-target ENIs block subnet deletion), Phase 4 sweeps the orphaned VPC.
 
 ```bash
 aws cloudformation delete-stack \
@@ -224,7 +229,95 @@ aws efs delete-file-system \
 
 ---
 
-### Phase 4: Delete the SSM secrets
+### Phase 4: Delete the orphaned VPC and networking
+
+**Gate: stack is `DELETE_COMPLETE` (Phase 2); EFS handled (Phase 3, done or skipped).**
+
+The VPC, subnets, route table, internet gateway, and security group are
+stack-owned, so a clean stack delete removes them. They survive only when the
+stack delete skipped them — the `FORCE_DELETE_STACK` recovery path skips any
+resource whose delete fails, and the usual cause is EFS mount-target ENIs
+blocking subnet deletion. Once Phase 3 deletes the file system (and with it the
+mount targets + their ENIs), the networking is unblocked and the orphaned VPC
+can be removed.
+
+Find the VPC by its `Name` tag:
+
+```bash
+VPC_ID=$(aws ec2 describe-vpcs \
+  --region "$AWS_REGION" \
+  --filters "Name=tag:Name,Values=${CLAW_NAME}-vpc" \
+  --query 'Vpcs[].VpcId' --output text)
+
+if [ -z "$VPC_ID" ]; then
+  echo "vpc: gone (stack delete cleaned it up)"
+else
+  echo "vpc: ORPHANED ($VPC_ID) — removing"
+fi
+```
+
+If `VPC_ID` is empty, the stack delete handled the VPC — skip the rest of this
+phase. Otherwise, delete the VPC's dependencies in dependency order, then the
+VPC. Each delete is tag-scoped to the claw's resources and tolerates resources
+that are already gone:
+
+```bash
+# Subnets — deleting a subnet clears its route-table associations
+for s in $(aws ec2 describe-subnets --region "$AWS_REGION" \
+    --filters "Name=vpc-id,Values=$VPC_ID" \
+    --query 'Subnets[].SubnetId' --output text); do
+  aws ec2 delete-subnet --subnet-id "$s" --region "$AWS_REGION" \
+    && echo "subnet deleted: $s" || echo "subnet left: $s"
+done
+
+# Custom route table (the VPC's main route table is removed with the VPC)
+for rt in $(aws ec2 describe-route-tables --region "$AWS_REGION" \
+    --filters "Name=vpc-id,Values=$VPC_ID" \
+    --query 'RouteTables[?Associations[0].Main!=`true`].RouteTableId' --output text); do
+  aws ec2 delete-route-table --route-table-id "$rt" --region "$AWS_REGION" \
+    && echo "route table deleted: $rt" || echo "route table left: $rt"
+done
+
+# Internet gateway — detach, then delete
+for igw in $(aws ec2 describe-internet-gateways --region "$AWS_REGION" \
+    --filters "Name=attachment.vpc-id,Values=$VPC_ID" \
+    --query 'InternetGateways[].InternetGatewayId' --output text); do
+  aws ec2 detach-internet-gateway --internet-gateway-id "$igw" \
+    --vpc-id "$VPC_ID" --region "$AWS_REGION" || true
+  aws ec2 delete-internet-gateway --internet-gateway-id "$igw" \
+    --region "$AWS_REGION" \
+    && echo "internet gateway deleted: $igw" || echo "internet gateway left: $igw"
+done
+
+# Security group (skip the VPC default — it is removed with the VPC)
+for sg in $(aws ec2 describe-security-groups --region "$AWS_REGION" \
+    --filters "Name=vpc-id,Values=$VPC_ID" \
+    --query 'SecurityGroups[?GroupName!=`default`].GroupId' --output text); do
+  aws ec2 delete-security-group --group-id "$sg" --region "$AWS_REGION" \
+    && echo "security group deleted: $sg" || echo "security group left: $sg"
+done
+
+# The VPC
+aws ec2 delete-vpc --vpc-id "$VPC_ID" --region "$AWS_REGION" \
+  && echo "vpc deleted: $VPC_ID" || echo "vpc STILL EXISTS: $VPC_ID"
+```
+
+> **A lingering network interface blocks the chain.** `delete-subnet` fails with
+> a dependency error if any ENI remains in it. After scaling to 0 (Phase 1) and
+> deleting EFS (Phase 3) there should be none, but a stuck Fargate task ENI can
+> persist. The deployer policy does not grant `ec2:DeleteNetworkInterface` —
+> Fargate ENIs are not claw-tagged, so the action cannot be tag-scoped safely.
+> Delete a stuck ENI from the console, then re-run this sweep.
+
+> **The deployer can delete only claw-tagged networking.** Every resource deleted
+> above carries a `Name=bclaw*` tag, which is what the policy's
+> `EC2NetworkingManage` statement (`aws:ResourceTag/Name: bclaw*`) keys on. The
+> read-only `Describe*` calls are unscoped, so finding the VPC always works; the
+> deletes succeed only against the claw's own resources.
+
+---
+
+### Phase 5: Delete the SSM secrets
 
 **Gate: stack deleted (Phase 2); EFS handled (Phase 3, skipped or done).**
 
@@ -268,7 +361,7 @@ Expected: an empty list.
 
 ---
 
-### Phase 5: Final verification and report
+### Phase 6: Final verification and report
 
 Confirm nothing is left under the claw's name:
 
@@ -285,6 +378,12 @@ aws efs describe-file-systems --region "$AWS_REGION" \
   --output text | grep -q . \
   && echo "efs: STILL EXISTS" || echo "efs: gone"
 
+# No remaining VPC
+aws ec2 describe-vpcs --region "$AWS_REGION" \
+  --filters "Name=tag:Name,Values=${CLAW_NAME}-vpc" \
+  --query 'Vpcs[].VpcId' --output text | grep -q . \
+  && echo "vpc: STILL EXISTS" || echo "vpc: gone"
+
 # No remaining SSM params
 aws ssm describe-parameters \
   --parameter-filters "Key=Name,Option=BeginsWith,Values=/bclaw/" \
@@ -295,6 +394,7 @@ aws ssm describe-parameters \
 Report to the user:
 - Stack status (gone)
 - EFS status (gone, or retained ID if they chose to keep it)
+- VPC + networking status (gone, or leftover IDs if an ENI blocked deletion)
 - SSM parameters status (gone)
 - Reminder that the Slack app config (bot/app tokens, allowed users, home
   channel) still exists on the Slack side and can be reused for a future deploy
@@ -324,9 +424,12 @@ Report to the user:
 - **The SSM namespace is hardcoded (`/bclaw/`), not derived from `ClawName`.** Secrets live at
   `/bclaw/<KEY>` so the deployer's IAM policy can be scoped to
   `parameter/bclaw/*` (see the setup skill's Phase 0). With one claw per
-  account, Phase 4 deleting `/bclaw/*` removes the account's entire secret
+  account, Phase 5 deleting `/bclaw/*` removes the account's entire secret
   set — correct for a full teardown.
 
 - **Order matters.** Always scale to 0 (Phase 1) before deleting the stack
   (Phase 2). Deleting the stack while the task is running can leave the EFS
-  mount in a busy state, blocking file-system deletion in Phase 3.
+  mount in a busy state, blocking file-system deletion in Phase 3. The VPC
+  sweep (Phase 4) runs after the EFS delete (Phase 3) for the same reason:
+  EFS mount-target ENIs block subnet/VPC deletion until the mount targets are
+  gone.
