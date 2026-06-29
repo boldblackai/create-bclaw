@@ -13,7 +13,7 @@ control — everything else on the claw is left untouched (overlay, not replace)
 agent_home/
   config.yaml          # non-env-driven config (skills, toolsets, MCP, model)
   system-prompt.md     # custom system prompt / persona
-  skills/              # curated skills (SKILL.md + references/)
+  skills/              # curated skills (SKILL.md)
   memories/            # curated memories
   personas/            # persona definitions
 ```

@@ -30,6 +30,26 @@ scopes, and KMS alias — is renamed to `foo`. See
 - `src/` is the generator (`cli.ts` + `generate.ts`); `test/golden.test.mjs` is
   the correctness proof.
 
+## Skills
+
+Skills ship inside `template/.agents/skills/` and are consumed by the generated
+claw, so their content must be **factual and present-tense** — instructional
+steps and current-state facts only.
+
+- **No historical or changelog narrative.** Do not write "previously gated
+  on…", "was migrated from X to Y", "future template improvement: …", "the old
+  behavior", or similar past/future-state framing in shipped skill files (the
+  `SKILL.md`, plus shipped supporting files like `template.yaml` and
+  `scripts/`).
+- **No war-story framing.** Keep findings as stated facts, not discovery
+  narrative ("a real deploy hit…", "near-miss from…", "bit a real deploy",
+  "we discovered…").
+- **Discovery narratives, "why" background, migration histories, and
+  lessons-learned belong in the repo-level `references/` directory** (not
+  inside `template/`). Those docs are for authors of this repo and do not ship
+  in the generated claw. Never cite `references/` from shipped skill content —
+  each skill must be self-contained.
+
 ## Tool Versions
 
 This project uses `mise.toml` as the single source of truth for all tool and

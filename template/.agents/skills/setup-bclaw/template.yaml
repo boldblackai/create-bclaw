@@ -357,7 +357,7 @@ Resources:
   # doesn't start before the SSM parameters exist (it would crash-loop on the
   # missing env vars), then scales to 1. The default is 1, not 0, deliberately
   # — a stack update that forgets to re-pass it keeps the claw running instead
-  # of silently scaling it to 0 (see references/template-pitfalls.md §7).
+  # of silently scaling it to 0.
   #
   # The claw is a Slack socket-mode bot (see README + slack-manifest.json).
   # Always-required parameters (unconditional in secrets[]):

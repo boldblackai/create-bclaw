@@ -141,8 +141,8 @@ def main():
 
     # Guard: ECS service DesiredCount must be a !Ref, not a hardcoded literal.
     # A hardcoded DesiredCount: 0 is re-applied on every stack update and silently
-    # takes the claw down (see references/template-pitfalls.md §7). It must be a
-    # parameter (default 1) so an update that omits it keeps the service running.
+    # takes the claw down. It must be a parameter (default 1) so an update that
+    # omits it keeps the service running.
     svc_resources = [r for r in resources.values()
                      if isinstance(r, dict) and r.get("Type") == "AWS::ECS::Service"]
     if svc_resources:
@@ -150,8 +150,7 @@ def main():
         if not (isinstance(dc, dict) and "Ref" in dc and dc["Ref"] == "DesiredCount"):
             errors.append(
                 "AWS::ECS::Service DesiredCount must be !Ref DesiredCount, not a "
-                f"hardcoded literal (got {dc!r}); make it a parameter defaulting to 1 "
-                "(see references/template-pitfalls.md §7)"
+                f"hardcoded literal (got {dc!r}); make it a parameter defaulting to 1"
             )
 
     # Inspect task definition secrets
