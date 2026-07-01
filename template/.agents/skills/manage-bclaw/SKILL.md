@@ -608,7 +608,7 @@ If the new image is bad, re-run this mode with the previous tag
 ## Notes
 
 - **Exec runs as root.** `aws ecs execute-command` opens a **root** shell (see
-  the setup skill's Phase 5 note). Files written or modified by exec are owned
+  the setup skill's Phase 6 note). Files written or modified by exec are owned
   by root unless you `chown -R 1000:1000` afterward. Without it the non-root
   gateway can't later modify or delete those files (EFS honors POSIX ownership).
   Use `runuser -u harness --` to run commands as the workload user (uid 1000)
@@ -652,7 +652,7 @@ If the new image is bad, re-run this mode with the previous tag
   parts of it from env. Overlay `config.yaml` only for keys that are **not**
   env-driven (e.g. skills, toolsets, MCP servers, model overrides). For
   env-driven keys (API keys, Slack config), update the SSM parameters instead
-  (see the setup skill's Phase 3 / Phase 5a token-rotation recipe).
+  (see the setup skill's Phase 3 / Phase 6a token-rotation recipe).
 
 - **Idempotent.** Running the overlay mode twice with the same `agent_home/` is a
   no-op (identical files overwrite themselves). Safe to re-run after fixing a

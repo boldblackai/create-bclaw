@@ -4,8 +4,8 @@ description: >
   Bootstraps a Hermes Agent bclaw on AWS ECS Fargate from scratch to a running
   gateway. Follows a gated sequence: probe ARM64 AZs → deploy CloudFormation
   (VPC, EFS, ECS service at DesiredCount 0 on the first deploy) → write SSM
-  secrets → scale to 1
-  → verify. Use when setting up a new bclaw on AWS, migrating from fly.io, or
+  secrets → scale to 1 → verify → overlay
+  curated `agent_home/` state. Use when setting up a new bclaw on AWS, migrating from fly.io, or
   re-deploying after teardown. Companion to teardown-bclaw.
 ---
 
@@ -345,7 +345,7 @@ entire subsection if the user opted out.
 
 | SSM key | What it is | Where to find it |
 |---|---|---|
-| `/bclaw/GH_TOKEN_VAL` | GitHub PAT — used for on-boot `gh auth login` (see Phase 5a). Named `*_VAL`, not `GH_TOKEN`, to dodge `gh`'s reserved env var | https://github.com/settings/tokens (classic PAT or fine-grained; needs the scopes the claw's `gh`/git usage requires) |
+| `/bclaw/GH_TOKEN_VAL` | GitHub PAT — used for on-boot `gh auth login` (see Phase 6a). Named `*_VAL`, not `GH_TOKEN`, to dodge `gh`'s reserved env var | https://github.com/settings/tokens (classic PAT or fine-grained; needs the scopes the claw's `gh`/git usage requires) |
 
 **Inference-provider key (1, from Phase 1 `$INFER_PROVIDER`):** create the one
 matching the chosen provider — this is the key the gateway uses as its model
@@ -482,17 +482,67 @@ Look for the Slack socket-mode connection succeeding (e.g. a "gateway started"
 or "slack connected" line). You may also see an early `[gh-auth] login failed
 (non-fatal)` line if the GitHub login didn't take (only when GitHub auth is
 enabled — `ENABLE_GH=true`; an opt-out claw logs nothing here) — that's
-non-blocking (see Phase 5a to verify/fix). `Ctrl-C` to stop following once you
+non-blocking (see Phase 6a to verify/fix). `Ctrl-C` to stop following once you
 see the gateway is up.
 
 ---
 
-### Phase 5: Shell-in
+### Phase 5: Overlay agent_home/ onto the claw
+
+**Gate: task is `RUNNING` and the gateway connected (Phase 4).**
+
+Establish the curated baseline — config, skills, memories, system prompt,
+`SOUL.md` persona — on the claw's `/home/harness/.hermes` instead of the
+self-seeded defaults the gateway booted with in Phase 4.
+
+This is the **same overlay** the `manage-bclaw` skill performs for ongoing
+updates; it owns the full procedure (tar+base64 over ECS Exec, chunked
+transfer, decode/extract/`chown`, merge-with-overwrite semantics, dry-run
+gate). Run `manage-bclaw` in **Mode 1 (Overlay)** now. Setup has already
+satisfied its entry conditions, so you do not need to re-collect them:
+
+- **Claw name + region** — `$CLAW_NAME` / `$AWS_REGION` from Phase 1.
+- **A RUNNING task + `$TASK_ARN`** — from Phase 4b. This satisfies the
+  manage skill's shared-first-step RUNNING check.
+- **Session Manager plugin** — the manage skill's Prereq §3 applies (it is
+  also needed for shell-in in Phase 6); its smoke-test exec command is the
+  first ECS Exec call of this setup, so run it to confirm the plugin works
+  and the caller has exec perms.
+
+If `agent_home/` is absent or contains only excluded files, there is nothing
+to overlay — skip this phase; the claw keeps its self-seeded defaults.
+
+#### Restart to apply (setup-specific)
+
+`manage-bclaw` Mode 1 ends by asking whether to restart, since ongoing
+overlays often don't need one. At **first boot** the answer is always yes:
+the gateway started in Phase 4 on defaults, and the overlay's curated
+`system-prompt.md` / `SOUL.md` / skills / config are not read until the task
+restarts. Restart unconditionally:
+
+```bash
+aws ecs update-service --cluster "$CLAW_NAME" --service "$CLAW_NAME" \
+  --force-new-deployment --region "$AWS_REGION"
+aws ecs wait tasks-running --cluster "$CLAW_NAME" \
+  --tasks "$(aws ecs list-tasks --cluster "$CLAW_NAME" --region "$AWS_REGION" \
+    --query 'taskArns[0]' --output text)" \
+  --region "$AWS_REGION"
+```
+
+Mind `manage-bclaw`'s cloud-mode `config.yaml` caveat: in cloud mode a
+restart re-seeds `config.yaml`'s env-driven keys (model/provider, API keys,
+Slack config) from the SSM parameters written in Phase 3, so overlay
+`config.yaml` only for non-env-driven keys. `SOUL.md`, `system-prompt.md`,
+skills, and memories are not env-driven and apply cleanly.
+
+---
+
+### Phase 6: Shell-in
 
 **Gate: task is `RUNNING` and gateway logs show a healthy connection.**
 
 The claw is now live. GitHub (`gh`) authentication is **automatic on boot when
-enabled** (`ENABLE_GH=true`, Phase 1 step 3) — see Phase 5a below; there is no
+enabled** (`ENABLE_GH=true`, Phase 1 step 3) — see Phase 6a below; there is no
 manual auth step. To shell into the container
 (uses SSM Session Manager under the hood — requires the [Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)
 locally):
@@ -512,7 +562,7 @@ aws ecs execute-command --cluster "$CLAW_NAME" --task "$TASK_ARN" \
 > workload user. To check the workload's actual uid from outside:
 > `stat -c %u /proc/1` — `id -u` inside the exec session reports root.
 
-#### 5a. GitHub authentication (automatic on boot)
+#### 6a. GitHub authentication (automatic on boot)
 
 `gh`/HTTPS-git authentication is **not** a manual step — when GitHub auth is
 enabled (`ENABLE_GH=true`), the task definition injects `GH_TOKEN_VAL` from
@@ -563,16 +613,17 @@ for creating a PAT and the scopes the claw's `gh`/git usage requires.
 
 ---
 
-### Phase 6: Final report
+### Phase 7: Final report
 
 Report to the user:
 
 - Claw name, region, inference provider, and the AZ the task landed in (with ARM64 confirmation)
 - Stack name and key outputs (cluster, EFS file system ID, SSM prefix)
 - The SSM parameter locations (4 Slack + the provider key, plus `/bclaw/GH_TOKEN_VAL` if GitHub auth was enabled — values never displayed)
-- GitHub auth (if enabled) is automatic on boot from `/bclaw/GH_TOKEN_VAL` (Phase 5a) — verify with `runuser -u harness -- gh auth status` from an exec session; if disabled, `gh auth status` showing "not logged in" is expected
+- `agent_home/` overlaid onto `~/.hermes` (config, skills, memories, `SOUL.md`) and the task restarted to apply it; re-run via the `manage-bclaw` skill (Mode 1) to push later changes
+- GitHub auth (if enabled) is automatic on boot from `/bclaw/GH_TOKEN_VAL` (Phase 6a) — verify with `runuser -u harness -- gh auth status` from an exec session; if disabled, `gh auth status` showing "not logged in" is expected
 - How to tail logs: `aws logs tail "/ecs/${CLAW_NAME}" --follow --region "$AWS_REGION"`
-- How to shell in: the `aws ecs execute-command` snippet from Phase 5
+- How to shell in: the `aws ecs execute-command` snippet from Phase 6
 - How to tear down: point at the `teardown-bclaw` skill
 
 ---

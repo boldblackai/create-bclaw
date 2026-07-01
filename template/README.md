@@ -73,7 +73,7 @@ condition that restricts to our resources only):
 - **Shell-in (ECS Exec) permissions are included.** The policy grants
   `ecs:ExecuteCommand` scoped to the bclaw cluster + tasks (`ECSExec`), plus the
   four `ssmmessages:*` channel actions (`SSMMessages`). These are needed by the
-  setup skill (Phase 5), teardown skill, and the `manage-bclaw`
+  setup skill (Phases 5–6), teardown skill, and the `manage-bclaw`
   skill. `ssmmessages:*` cannot be resource-scoped — see the "Why some resources
   stay `Resource: *`" table below.
 
@@ -191,7 +191,7 @@ login is skipped and no token is injected.
 
 | SSM key | What it is | Where to find it |
 |---|---|---|
-| `/bclaw/GH_TOKEN_VAL` | GitHub PAT — on-boot `gh auth login` (see setup skill Phase 5a). Named `*_VAL`, not `GH_TOKEN`, to avoid `gh`'s reserved env var | https://github.com/settings/tokens |
+| `/bclaw/GH_TOKEN_VAL` | GitHub PAT — on-boot `gh auth login` (see setup skill Phase 6a). Named `*_VAL`, not `GH_TOKEN`, to avoid `gh`'s reserved env var | https://github.com/settings/tokens |
 
 ### Inference-provider key (choose one)
 

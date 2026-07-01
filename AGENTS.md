@@ -48,7 +48,12 @@ steps and current-state facts only.
   lessons-learned belong in the repo-level `references/` directory** (not
   inside `template/`). Those docs are for authors of this repo and do not ship
   in the generated claw. Never cite `references/` from shipped skill content —
-  each skill must be self-contained.
+  each skill must be self-contained **relative to what ships**: a skill may
+  reference a sibling skill under `template/.agents/skills/` (the setup /
+  manage / teardown skills always ship together in the generated claw, so
+  cross-references between them are stable and preferred over duplicating
+  shared procedure), but it must never depend on author-only docs, scripts, or
+  state that won't be present in the generated repo.
 
 ## Tool Versions
 
