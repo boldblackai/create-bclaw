@@ -149,9 +149,8 @@ aws cloudformation wait stack-delete-complete \
   gone. Two manifestations observed on this deployer policy:
   - **EFS mount targets (403).** The handler fails to clear them even though
     direct CLI calls (`describe-mount-targets`, `delete-file-system`) succeed
-    under the same principal — EFS delete permissions are tag-conditioned
-    (`aws:ResourceTag/Name: bclaw-data`) and don't evaluate identically through
-    CloudFormation's handler. Verify they're gone with
+    under the same principal — CloudFormation's handler can evaluate tag
+    conditions differently than direct API calls. Verify they're gone with
     `aws efs describe-mount-targets` per FS (deployer CAN do this via CLI).
   - **IAM roles (`NoSuchEntity`).** The exec/task roles (`bclaw-*`) can be
     deleted out from under the handler (e.g. a prior partial teardown), so the

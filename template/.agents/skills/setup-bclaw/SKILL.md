@@ -39,12 +39,11 @@ deployer principal is missing an action, CloudFormation will surface the exact
 Two IAM constraints are built into the shipped `bclaw-deploy-policy.json` and
 are required for the stack to create successfully:
 
-- **EFS mount targets cannot be tag-conditioned.** The policy's `EFSMountTargets`
-  statement grants `CreateMountTarget`/`DeleteMountTarget`/`DescribeMountTargets`
-  unconditionally (`Resource: *`, no condition) because mount targets are not
-  taggable — an `aws:ResourceTag/Name` condition on them always evaluates to
-  false and implicitly denies. The taggable EFS resources (file system, access
-  points) are still tag-conditioned in `EFSManageTagged`.
+- **EFS mount-target actions are tag-conditioned.** The policy's `EFSManage`
+  statement covers `CreateMountTarget`/`DeleteMountTarget`/`DescribeMountTargets`
+  alongside other EFS manage actions under `aws:ResourceTag/Name = bclaw-data`.
+  Mount-target actions evaluate against the `file-system` resource type (which
+  IS taggable), so the tag condition scopes them to the claw's own file system.
 - **Service-linked roles must exist or be creatable.** The policy's
   `ServiceLinkedRoles` statement grants `iam:CreateServiceLinkedRole` scoped to
   the EFS, ECS, and ECS-autoscaling service-linked roles. When a service-linked

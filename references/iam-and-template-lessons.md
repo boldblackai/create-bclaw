@@ -112,29 +112,41 @@ through a deployment failure.
 - **Fix**: Added to KMSCreateKey (unconstrained). Also remains in KMSUseKey
   (alias-conditioned) for runtime use — having it in both is harmless.
 
-### EFS mount targets cannot be tag-conditioned (EFSManage split)
+### EFS mount-target actions are tag-conditioned (EFSManage unified)
 - **Error**: `User is not authorized to perform that action on the specified
   resource (Service: Efs, Status Code: 403)` on `CreateMountTarget` during
   stack creation. Everything else in the stack event log (TaskRole,
   ExecutionRole, SecurityGroupSelfIngress, PublicRouteTable — all "Resource
   creation cancelled") was cascading cancellation triggered by the EFS failure.
-- **Why**: The original `EFSManage` statement bundled file-system actions AND
-  mount-target actions under a single `aws:ResourceTag/Name = bclaw-data`
-  condition. EFS **mount targets cannot be tagged** — the `aws:ResourceTag/Name`
-  condition key evaluates against the resource being acted on
-  (`CreateMountTarget` creates a mount target, which has no tags), so the
-  condition always evaluates to false → implicit deny. The file system and
-  access points (which ARE taggable) created fine; the mount targets failed.
-- **Fix**: Split `EFSManage` into two statements:
-  1. `EFSManageTagged` (still tag-conditioned) — `DeleteFileSystem`,
-     `CreateAccessPoint`, `DeleteAccessPoint`, `CreateTags`, `TagResource`.
-  2. `EFSMountTargets` (unconditional `Resource: *`, no condition) —
-     `CreateMountTarget`, `DeleteMountTarget`, `DescribeMountTargets`.
-- **Generalization**: any `aws:ResourceTag` condition on an action whose target
-  resource is untaggable will silently deny. EFS mount targets are the classic
-  case; the same applies to ENI attachments and other ID-only resources. When
-  a tag-conditioned statement bundles actions across taggable and untaggable
-  resources, split it.
+- **Initial (incorrect) diagnosis**: The original `EFSManage` statement bundled
+  file-system and mount-target actions under a single `aws:ResourceTag/Name =
+  bclaw-data` condition. The initial diagnosis assumed EFS mount targets are
+  untaggable, so the condition always evaluated to false. This led to splitting
+  `EFSManage` into `EFSManageTagged` (tag-conditioned) + `EFSMountTargets`
+  (unconditional `Resource: *`).
+- **Corrected diagnosis**: The AWS Service Authorization Reference (checked via
+  `policy_sentry`'s IAM definition database) confirms there is NO
+  `mount-target` resource type in EFS IAM. The only EFS resource types are
+  `file-system` and `access-point`. All three mount-target actions
+  (`CreateMountTarget`, `DeleteMountTarget`, `DescribeMountTargets`) evaluate
+  against the `file-system` resource type, which DOES support
+  `aws:ResourceTag/${TagKey}`. The EFS file system IS tagged `Name=bclaw-data`
+  by the template, so the tag condition should evaluate correctly. The original
+  403 was likely caused by the missing `iam:CreateServiceLinkedRole` for EFS
+  (see next entry), not the tag condition — the EFS SLR
+  (`AWSServiceRoleForAmazonElasticFileSystem`) is needed for mount-target
+  operations and may not have existed in the account.
+- **Fix**: Reverted to the original single `EFSManage` statement covering all
+  EFS manage/mutate actions (file system, mount targets, access points, tags)
+  under `aws:ResourceTag/Name = bclaw-data`. This is tighter than the split
+  (which used unconditional `Resource: *` for mount targets) and corrects the
+  likely misdiagnosis. The `ServiceLinkedRoles` fix (next entry) is what
+  probably solved the real deploy failure.
+- **Caveat**: This has not been verified with a real deploy. The initial
+  diagnosis was based on real CloudFormation failure events that are not
+  accessible from this environment. The tag-conditioned approach should work
+  per the IAM definition, but a CloudFormation handler-specific evaluation
+  quirk cannot be ruled out without a live test.
 
 ### iam:CreateServiceLinkedRole (ServiceLinkedRoles)
 - **Error**: `Invalid request provided: Unable to assume the service linked
@@ -225,7 +237,7 @@ statement. That's why `CreateTags` stays in the (now unconditional) Create
 statement, not the Manage statement. `DeleteTags` stays in the Manage
 statement (ResourceTag-gated) because by the time you're deleting a tag, the
 resource already exists and its tags can be read. This same asymmetry is why
-`EFSFileSystemCreate` uses `RequestTag` and `EFSFileSystemManage` uses
+`EFSFileSystemCreate` uses `RequestTag` and `EFSManage` uses
 `ResourceTag` — the pattern is general: tag-adding actions go with the
 Create-side statement (RequestTag-gated or unconditional), tag-on-existing-
 resource actions go with ResourceTag.

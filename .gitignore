@@ -1,6 +1,7 @@
 node_modules/
 .pnpm-store/
 dist/
+tmp/
 
 # npm pack output — publishing is a manual step, never commit tarballs
 *.tgz

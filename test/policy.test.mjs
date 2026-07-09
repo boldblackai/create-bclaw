@@ -1,9 +1,10 @@
 // Policy structure tests for bclaw-deploy-policy.json.
 //
-// These tests guard the deployer IAM policy against regressions of two
+// These tests guard the deployer IAM policy against regressions of
 // CloudFormation deployment failures caused by missing/incorrect permissions:
-//   1. EFS mount-target actions cannot be tag-conditioned (mount targets are
-//      untaggable, so a ResourceTag condition implicitly denies them).
+//   1. EFS mount-target actions are tag-conditioned alongside other EFS
+//      manage actions (mount-target actions evaluate against the file-system
+//      resource type, which IS taggable).
 //   2. ECS (and EFS) service-linked roles must be creatable by the deployer
 //      when they don't already exist in the account.
 //
@@ -35,33 +36,17 @@ test("policy is valid JSON with a Statement array", async () => {
   assert.ok(policy.Statement.length > 0, "Statement must not be empty");
 });
 
-// ── Fix 1: EFS mount targets cannot be tag-conditioned ──────────────────────
+// ── EFS mount targets: tag-conditioned with other EFS manage actions ────────
 
-test("the old single EFSManage statement no longer exists", async () => {
+test("EFSManage is a single tag-conditioned statement covering all EFS manage actions", async () => {
   const policy = await loadPolicy();
-  const efsManage = findStmt(policy.Statement, "EFSManage");
-  assert.equal(
-    efsManage,
-    undefined,
-    "EFSManage should be split into EFSManageTagged + EFSMountTargets",
-  );
-});
-
-test("EFSManageTagged is tag-conditioned and excludes mount-target actions", async () => {
-  const policy = await loadPolicy();
-  const stmt = findStmt(policy.Statement, "EFSManageTagged");
-  assert.ok(stmt, "EFSManageTagged statement must exist");
+  const stmt = findStmt(policy.Statement, "EFSManage");
+  assert.ok(stmt, "EFSManage statement must exist");
   assert.equal(stmt.Effect, "Allow");
 
   const actions = stmt.Action;
-  const mountTargetActions = actions.filter((a) => a.toLowerCase().includes("mounttarget"));
-  assert.equal(
-    mountTargetActions.length,
-    0,
-    `EFSManageTagged must NOT include mount-target actions (found: ${mountTargetActions.join(", ")})`,
-  );
 
-  // Must still cover taggable EFS resources: file system delete, access points, tags.
+  // Must cover taggable EFS resources: file system delete, access points, tags.
   for (const required of [
     "elasticfilesystem:DeleteFileSystem",
     "elasticfilesystem:CreateAccessPoint",
@@ -69,46 +54,48 @@ test("EFSManageTagged is tag-conditioned and excludes mount-target actions", asy
     "elasticfilesystem:CreateTags",
     "elasticfilesystem:TagResource",
   ]) {
-    assert.ok(actions.includes(required), `EFSManageTagged missing ${required}`);
+    assert.ok(actions.includes(required), `EFSManage missing ${required}`);
   }
 
-  // Must carry the tag condition.
-  assert.ok(
-    stmt.Condition?.StringEquals?.["aws:ResourceTag/Name"],
-    "EFSManageTagged must be tag-conditioned on aws:ResourceTag/Name",
-  );
-});
-
-test("EFSMountTargets is unconditional and covers only mount-target actions", async () => {
-  const policy = await loadPolicy();
-  const stmt = findStmt(policy.Statement, "EFSMountTargets");
-  assert.ok(stmt, "EFSMountTargets statement must exist");
-  assert.equal(stmt.Effect, "Allow");
-  assert.equal(
-    stmt.Resource,
-    "*",
-    "EFSMountTargets must be Resource: * (mount targets are untaggable)",
-  );
-
-  // No condition — mount targets can't be tagged, so any condition would deny.
-  assert.equal(stmt.Condition, undefined, "EFSMountTargets must NOT have a Condition");
-
-  const actions = stmt.Action;
+  // Must also cover mount-target actions — these evaluate against the
+  // file-system resource type (which IS taggable), so the tag condition
+  // scopes them to the claw's own file system.
   for (const required of [
     "elasticfilesystem:CreateMountTarget",
     "elasticfilesystem:DeleteMountTarget",
     "elasticfilesystem:DescribeMountTargets",
   ]) {
-    assert.ok(actions.includes(required), `EFSMountTargets missing ${required}`);
-  }
-
-  // Must not leak non-mount-target actions into the unconditional statement.
-  for (const a of actions) {
     assert.ok(
-      a.toLowerCase().includes("mounttarget"),
-      `EFSMountTargets should only contain mount-target actions, found ${a}`,
+      actions.includes(required),
+      `EFSManage must include ${required} (mount-target actions evaluate against the file-system resource type)`,
     );
   }
+
+  // Must carry the tag condition.
+  assert.ok(
+    stmt.Condition?.StringEquals?.["aws:ResourceTag/Name"],
+    "EFSManage must be tag-conditioned on aws:ResourceTag/Name",
+  );
+});
+
+test("EFSMountTargets statement does not exist (mount targets are in EFSManage)", async () => {
+  const policy = await loadPolicy();
+  const stmt = findStmt(policy.Statement, "EFSMountTargets");
+  assert.equal(
+    stmt,
+    undefined,
+    "EFSMountTargets should not exist — mount-target actions belong in the tag-conditioned EFSManage statement",
+  );
+});
+
+test("EFSManageTagged statement does not exist (superseded by EFSManage)", async () => {
+  const policy = await loadPolicy();
+  const stmt = findStmt(policy.Statement, "EFSManageTagged");
+  assert.equal(
+    stmt,
+    undefined,
+    "EFSManageTagged should not exist — the unified statement is EFSManage",
+  );
 });
 
 // ── Fix 2: service-linked role creation permission ──────────────────────────
