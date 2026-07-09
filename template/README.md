@@ -53,6 +53,7 @@ the hard AWS constraints:
 |---|---|
 | `EC2Networking` | VPC/subnet/IGW/route-table/SG ARNs use AWS-assigned IDs (`vpc-xxx`, `subnet-xxx`, `sg-xxx`). The `Name` **tag** is set by the template but is NOT part of the ARN — so no prefix to pin. `ec2:Describe*` actions additionally don't support resource-level permissions at all (AWS requires `*`). |
 | `EFSDescribe` | `DescribeFileSystems`/`DescribeAccessPoints` are List-type actions that don't support resource-level conditions. Read-only — the sensitive delete/mutate EFS actions ARE tag-conditioned (see below). |
+| `EFSMountTargets` | EFS **mount targets cannot be tagged**, so `aws:ResourceTag/Name` conditions always evaluate to false against them — any condition implicitly denies. `CreateMountTarget`/`DeleteMountTarget`/`DescribeMountTargets` must be unconditional `Resource: *` with no condition. The file system and access points (which ARE taggable) remain tag-conditioned in `EFSManageTagged` (see below). |
 | `ECSTaskDefsAndTasks` | **Task definitions do not support resource-level permissions** (confirmed in the AWS ECS authorization reference) — `RegisterTaskDefinition`/`DescribeTaskDefinition`/`DeregisterTaskDefinition` must be `*`. `DescribeTasks`/`ListTasks` operate on tasks with runtime-assigned IDs. (Clusters and services DO support RLP and are pinned in `ECSScoped`.) |
 | `LogsDescribe` | `logs:DescribeLogGroups` is a list action that doesn't support resource-level. The sensitive write actions (`CreateLogGroup`/`DeleteLogGroup`/`PutLogEvents`) are pinned in `LogsScoped`. |
 | `SSMDescribe` | `ssm:DescribeParameters` is a list action, no resource-level support. The actual secret reads/writes are pinned in `SSMSecrets`. |
@@ -64,7 +65,7 @@ condition that restricts to our resources only):
 
 | Statement | Condition | What it protects |
 |---|---|---|
-| `EFSManage` | `aws:ResourceTag/Name = bclaw-data` | Can only delete/mutate the claw's own EFS file system + mount targets + access points (the template tags all 4 APs `Name=bclaw-data`). Cannot touch any other EFS in the account. |
+| `EFSManageTagged` | `aws:ResourceTag/Name = bclaw-data` | Can only delete/mutate the claw's own EFS file system + access points (the template tags all 4 APs `Name=bclaw-data`). Cannot touch any other EFS in the account. Does NOT cover mount targets — see `EFSMountTargets` above (mount targets are untaggable). |
 | `EFSFileSystemCreate` | `aws:RequestTag/Name = bclaw-data` | Can only create an EFS file system if it's tagged `Name=bclaw-data`. Prevents creating arbitrary EFS. |
 | `KMSUseKey` | `kms:ResourceAliases = alias/bclaw-ssm` | Can only Decrypt/Encrypt/ScheduleKeyDeletion on the claw's own CMK. Cannot use any other KMS key in the account. (Note: `kms:DescribeKey` and `kms:EnableKeyRotation` were moved to `KMSCreateKey` because the alias doesn't exist during key creation — see above.) |
 
@@ -85,6 +86,22 @@ condition that restricts to our resources only):
 - **`SimulateSelf` for roles.** The `bclaw-deploy` policy's `SimulateSelf`
   statement uses `${aws:username}`, which only resolves for IAM users. If you
   attach the policy to a *role*, change that Resource to `*` or the role's ARN.
+- **Service-linked role creation (`ServiceLinkedRoles`).** The policy grants
+  `iam:CreateServiceLinkedRole` scoped to three service-linked roles the deploy
+  needs: `AWSServiceRoleForAmazonElasticFileSystem` (EFS — for mount targets),
+  `AWSServiceRoleForECS` (ECS — for the service resource), and
+  `AWSServiceRoleForApplicationAutoScaling_ECSService` (ECS autoscaling —
+  preemptively included for future service auto-scaling). When a service-linked
+  role does not exist in the account, AWS auto-creates it using the caller's
+  credentials; without this permission the auto-creation fails and surfaces as a
+  400 error (e.g. "Unable to assume the service linked role"). The condition
+  uses `iam:AWSServiceName` (a string match on the AWS service principal) to
+  scope the grant to only these three services.
+
+  **Naming gotcha:** the ECS service-linked role is named
+  `AWSServiceRoleForECS`, NOT `AWSServiceRoleForAmazonECS` — the "Amazon" prefix
+  is inconsistent across AWS services. The EFS one IS
+  `AWSServiceRoleForAmazonElasticFileSystem` (with "Amazon").
 
 ### 3. Put the access key in `.env`
 

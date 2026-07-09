@@ -112,6 +112,71 @@ through a deployment failure.
 - **Fix**: Added to KMSCreateKey (unconstrained). Also remains in KMSUseKey
   (alias-conditioned) for runtime use — having it in both is harmless.
 
+### EFS mount targets cannot be tag-conditioned (EFSManage split)
+- **Error**: `User is not authorized to perform that action on the specified
+  resource (Service: Efs, Status Code: 403)` on `CreateMountTarget` during
+  stack creation. Everything else in the stack event log (TaskRole,
+  ExecutionRole, SecurityGroupSelfIngress, PublicRouteTable — all "Resource
+  creation cancelled") was cascading cancellation triggered by the EFS failure.
+- **Why**: The original `EFSManage` statement bundled file-system actions AND
+  mount-target actions under a single `aws:ResourceTag/Name = bclaw-data`
+  condition. EFS **mount targets cannot be tagged** — the `aws:ResourceTag/Name`
+  condition key evaluates against the resource being acted on
+  (`CreateMountTarget` creates a mount target, which has no tags), so the
+  condition always evaluates to false → implicit deny. The file system and
+  access points (which ARE taggable) created fine; the mount targets failed.
+- **Fix**: Split `EFSManage` into two statements:
+  1. `EFSManageTagged` (still tag-conditioned) — `DeleteFileSystem`,
+     `CreateAccessPoint`, `DeleteAccessPoint`, `CreateTags`, `TagResource`.
+  2. `EFSMountTargets` (unconditional `Resource: *`, no condition) —
+     `CreateMountTarget`, `DeleteMountTarget`, `DescribeMountTargets`.
+- **Generalization**: any `aws:ResourceTag` condition on an action whose target
+  resource is untaggable will silently deny. EFS mount targets are the classic
+  case; the same applies to ENI attachments and other ID-only resources. When
+  a tag-conditioned statement bundles actions across taggable and untaggable
+  resources, split it.
+
+### iam:CreateServiceLinkedRole (ServiceLinkedRoles)
+- **Error**: `Invalid request provided: Unable to assume the service linked
+  role. Please verify that the ECS service linked role exists. (Service: Ecs,
+  Status Code: 400)` on the ECS `Service` resource during stack creation.
+- **Why**: The ECS service-linked role (`AWSServiceRoleForECS`) did not exist
+  in the account. When a service-linked role doesn't exist, AWS tries to
+  auto-create it using the caller's credentials. The deployer policy had no
+  `iam:CreateServiceLinkedRole` permission at all, so the auto-creation failed
+  and surfaced as the 400 error above. The same issue would have affected EFS
+  mount targets on a fresh account (EFS also has a service-linked role,
+  `AWSServiceRoleForAmazonElasticFileSystem`), but the EFS SLR happened to
+  already exist. The ECS SLR did not.
+- **Fix**: Added a `ServiceLinkedRoles` statement granting
+  `iam:CreateServiceLinkedRole` scoped to three service-linked roles:
+  `AWSServiceRoleForAmazonElasticFileSystem` (EFS), `AWSServiceRoleForECS`
+  (ECS), `AWSServiceRoleForApplicationAutoScaling_ECSService` (ECS
+  autoscaling — preemptively included for future service auto-scaling). The
+  condition uses `iam:AWSServiceName` (a string match on the AWS service
+  principal) to scope the grant to only these three services.
+- **Naming gotcha**: the ECS service-linked role is named
+  `AWSServiceRoleForECS`, NOT `AWSServiceRoleForAmazonECS` — the "Amazon"
+  prefix is inconsistent across AWS services. The EFS one IS
+  `AWSServiceRoleForAmazonElasticFileSystem` (with "Amazon"). This was
+  discovered from the actual 403 error message, which printed the real role
+  path AWS tried to access.
+- **Diagnostic approach used**:
+  1. `aws cloudformation describe-stack-events` identified the root-cause
+     resource (EFS mount targets 403) vs. cascading cancellations.
+  2. Direct CLI test (`aws efs create-mount-target` outside CloudFormation)
+     confirmed the failure was real IAM, not a CFN handler quirk.
+  3. `aws iam simulate-principal-policy` showed `allowed` for
+     `elasticfilesystem:CreateMountTarget`, contradicting the real API call —
+     a false positive because simulate evaluates identity-based policies but
+     does NOT evaluate SCPs, permissions boundaries, or `iam:AWSServiceName`
+     condition keys without explicit `--context-entries`. The real API call
+     was the source of truth.
+  4. Error message parsing: the ECS SLR failure message printed the exact role
+     path AWS tried to access (`AWSServiceRoleForECS`), revealing the naming
+     inconsistency. When debugging IAM, read the full error text — it often
+     contains the exact resource ARN that was denied.
+
 ## Least-Privilege Refactors (EC2 Networking)
 
 The entries above are permissions *added* to fix deployment failures. The

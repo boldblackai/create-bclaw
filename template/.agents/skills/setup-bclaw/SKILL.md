@@ -36,6 +36,22 @@ completed before running this skill. Permissions are not pre-checked — if the
 deployer principal is missing an action, CloudFormation will surface the exact
 `is not authorized to perform` error at deploy time (Phase 2).
 
+Two IAM constraints are built into the shipped `bclaw-deploy-policy.json` and
+are required for the stack to create successfully:
+
+- **EFS mount targets cannot be tag-conditioned.** The policy's `EFSMountTargets`
+  statement grants `CreateMountTarget`/`DeleteMountTarget`/`DescribeMountTargets`
+  unconditionally (`Resource: *`, no condition) because mount targets are not
+  taggable — an `aws:ResourceTag/Name` condition on them always evaluates to
+  false and implicitly denies. The taggable EFS resources (file system, access
+  points) are still tag-conditioned in `EFSManageTagged`.
+- **Service-linked roles must exist or be creatable.** The policy's
+  `ServiceLinkedRoles` statement grants `iam:CreateServiceLinkedRole` scoped to
+  the EFS, ECS, and ECS-autoscaling service-linked roles. When a service-linked
+  role does not exist in the account, AWS auto-creates it using the caller's
+  credentials; without this permission the auto-creation fails and the stack
+  deploy surfaces a 400 error (e.g. "Unable to assume the service linked role").
+
 Before starting, ensure the shell has `mise` and `direnv` active and AWS
 credentials loaded. `mise` manages `aws-cli` (see `mise.toml`); credentials
 live in `.env` (gitignored) and are exported by `direnv` (`.envrc`):
