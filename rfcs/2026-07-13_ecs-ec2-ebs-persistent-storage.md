@@ -1,7 +1,48 @@
 # Move claw storage from EFS to persistent EBS on ECS (EC2 launch type)
 
 **Date:** 2026-07-13
-**Status:** Proposed
+**Status:** Implemented
+
+> ## Revision — integration-cycle implementation (2026-07-13)
+>
+> The prototype built in `/alt/integration`
+> deviates from the original *Technical Details* below in two load-bearing
+> ways, surfaced while implementing. The body has not been rewritten; this
+> block is the authoritative delta:
+>
+> 1. **Networking: `awsvpc` → `host` (the RFC as written would produce a dead
+>    claw).** The original plan keeps `awsvpc` + a public subnet + no NAT
+>    gateway. That works on Fargate (`AssignPublicIp: ENABLED` gives the task
+>    ENI a public IP) but is **broken on the EC2 launch type**: per AWS docs,
+>    awsvpc task ENIs on EC2 instances are never given a public IP, and awsvpc
+>    tasks in public subnets have **no internet** without a NAT gateway —
+>    `AssignPublicIp` is Fargate-only. The bot could not reach Slack (socket
+>    mode), ghcr.io (image pull), or `ssmmessages` (ECS Exec). Fixed by dropping
+>    to **`NetworkMode: host`**: the container rides the container instance's
+>    primary ENI (public IP via the launch template), restoring outbound with
+>    no NAT. SG-per-task isolation (the RFC's only stated reason to keep
+>    awsvpc) is a distinction without a difference at 1 task : 1 instance, so
+>    nothing is lost; the single inbound-less SG moves to the instance ENI, and
+>    the ECS `Service` drops its `NetworkConfiguration` entirely. ECS Exec still
+>    works over the host's internet path. *Pending live verification of ECS
+>    Exec on host networking.*
+> 2. **Self-healing: standalone instance → ASG `min=max=desired=1`.** The
+>    original plan uses a standalone `AWS::EC2::Instance` + a CloudWatch
+>    `StatusCheckFailed_System → RecoverInstance` alarm. The implementation
+>    uses an **Auto Scaling Group** instead, which also covers AWS-initiated
+>    instance retirement (the alarm did not). Consequences: no CloudWatch
+>    recovery alarm (the ASG + EC2 health checks are the recovery); **no
+>    `AWS::EC2::VolumeAttachment`** (CFN cannot pre-attach to an ASG-managed
+>    instance) — the retained standalone volume is found + attached **by tag**
+>    in the UserData on every boot, with a retry loop for the `VolumeInUse` race
+>    during ASG replacement; and the instance profile needs `ec2:AttachVolume`
+>    scoped by a **shared `ClawName` tag** (instance and volume have different
+>    `Name` values, so a per-resource `Name` condition can't match both sides
+>    of an `AttachVolume` request).
+>
+> **Open questions resolved:** (1) **fresh volume** (no EFS→EBS data
+> migration — the suspect WAL-corrupted DBs are the thing being escaped);
+> (2) **ASG from the start** (above); (3) **`1024` CPU on `t4g.large`**.
 
 ## Goal
 
@@ -298,43 +339,82 @@ skill rules — no migration narrative, no "previously EFS…" framing inside
   verify in `/alt/integration` (confirm WAL is healthy on the EBS-backed
   `state.db`/`kanban.db`, ECS Exec works, recovery behavior), **then** port back
   into `template/` and reconcile with `diff -rq /workspace/template
-  /alt/integration …`. An integration journal goes in
-  `references/integrations/2026-07-13_ecs-ec2-ebs.md`.
+  /alt/integration …`.
 
-## Implementation Checklist
+## Implementation notes
 
-- [ ] **RFC accepted** before any template edits (per `AGENTS.md`).
-- [ ] Integration cycle in `/alt/integration`:
-  - [ ] Rewrite `template.yaml`: remove EFS resources + NFS ingress + AZ2/SubnetB;
-    add `AWS::EC2::Volume` (retained) + `VolumeAttachment` + `AWS::EC2::Instance`
-    (ECS-optimized AL2023 arm64 via SSM param) + instance profile + recovery
-    alarm + `InstanceType` param.
-  - [ ] Task definition → EC2 compat + host bind-mount volumes; service →
-    `LaunchType: EC2`; single-AZ subnet.
-  - [ ] UserData: format-if-fresh (label `bclawdata`), mount-by-label, mkdir 4
-    subdirs `chown 1000:1000`, write `ECS_CLUSTER`.
-  - [ ] Deploy; confirm task reaches `RUNNING` on the EC2 instance.
-  - [ ] **Verify WAL health**: `PRAGMA journal_mode` on `state.db`/`kanban.db`
-    inside the container; confirm no corruption / no kanban retry storm in logs.
-  - [ ] Confirm ECS Exec shell-in still works (no behavior change expected).
-  - [ ] Confirm recovery: force a status-check failure / stop+start, verify EBS
-    reattaches and data persists.
-  - [ ] Edit setup/manage/teardown skills for the new resource model.
-  - [ ] Edit `bclaw-deploy-policy.json` (drop EFS perms, add EC2/cloudwatch
-    perms, tag-scoped).
-- [ ] Port back into `/workspace/template/`; run `diff -rq` reconciliation.
-- [ ] Run `pnpm test` (golden) + `pnpm lint` + `pnpm exec tsc --noEmit`.
-- [ ] Integration journal in `references/integrations/`.
-- [ ] On acceptance, update `template/README.md` + `template/AGENTS.md` for the
-  new storage model, and replace this checklist with implementation notes.
+Implemented in `/workspace/template/` and verified end-to-end in
+`/alt/integration` (live deploy + WAL/ECS-Exec/recovery checks all green).
+`pnpm test`
+(golden), `pnpm lint`, and `pnpm exec tsc --noEmit` all pass after the port-back.
+
+### What shipped (the deviations from the original *Technical Details* are
+authoritative — see the Revision block at the top)
+
+- **`template.yaml`**: EFS/Fargate/awsvpc/2-AZ resources removed; replaced with
+  standalone retained `AWS::EC2::Volume` + `AWS::EC2::LaunchTemplate` +
+  `AWS::AutoScaling::AutoScalingGroup` (`min=max=desired=1`, EC2 launch type) +
+  container-instance role + instance profile + ECS-optimized AL2023 arm64 AMI
+  via the public SSM parameter. Task uses `NetworkMode: host`; service has
+  `DeploymentConfiguration: MinimumHealthyPercent: 0` (recreate) + circuit
+  breaker. No `VolumeAttachment`, no CloudWatch recovery alarm (the ASG + EC2
+  health checks are the recovery).
+- **UserData**: the volume ID is **baked in via `Fn::Sub`**
+  (`VOL_ID='${EbsDataVolume}'`) — no runtime `describe-volumes`/tag lookup, so
+  leftover retained orphan volumes can't shadow the stack's current volume. The
+  UserData finds the attached block device via `ebsnvme-id` (polling up to 60s
+  for NVMe enumeration), formats-if-fresh (`mkfs.ext4 -L clawdata`), mounts by
+  label, mkdirs the 4 subdirs `chown 1000:1000`, and writes `ECS_CLUSTER`.
+  **It does NOT `systemctl restart ecs`** — ecs.service is `After=cloud-final`,
+  and UserData runs inside cloud-final, so a restart deadlocks; writing
+  `ECS_CLUSTER` and exiting lets systemd start ecs.service itself (~30s to
+  registration).
+- **Deploy policy**: dropped EFS + `SimulateSelf`; added EC2 volume / launch-
+  template / autoscaling / instance-profile / ASG-SLR perms, the public-AMI SSM
+  read, `ec2:RunInstances`/`TerminateInstances`, `DescribeImages`, SSM
+  host-debug perms, `cloudformation:DescribeStackResources`, and
+  `sts:DecodeAuthorizationMessage`. Compacted under the 6144-char managed-policy
+  limit by merging statements (consolidated `ReadOnlyDescribe`, `PassRole` with
+  a two-entry Resource and NO `PassedToService` condition — the condition broke
+  the ASG launch-template validation).
+- **Skills**: setup/manage/teardown rewritten for the new model; setup folded in
+  a Phase 5 Overlay; teardown added a Phase 4 orphan-VPC sweep. `template/README.md`
+  + `template/AGENTS.md` updated for the new storage/launch model.
+
+### Verified live in `/alt/integration`
+
+1. Task `RUNNING` + steady state on the EC2 instance (1024 CPU / 4096 MiB,
+   single AZ).
+2. ECS Exec shell-in works over host networking (no awsvpc/NAT/VPC endpoints).
+3. **WAL healthy on EBS** — `PRAGMA journal_mode=wal`, `integrity_check=ok` on
+   both `state.db` and `kanban.db`, with `-shm` present (the migration's core
+   goal — SQLite WAL now runs on a real block device, not NFS).
+4. **ASG recovery + EBS reattach** — a marker file survived instance
+   replacement; the same retained volume reattached by baked ID.
+5. **Recreate deploy** — `force-new-deployment` completes (stop-old-then-
+   start-new) instead of stalling; secret rotations / image upgrades work.
+
+### Follow-ups (not blocking)
+
+- The `/alt/integration` `agent_home/SOUL.md` persona content drifted from the
+  canonical during the cycle (co-author guidance wording). **Not** architecture;
+  left as the canonical shipped default — a separate curatorial decision.
+- Standalone-instance hardening (the original *Technical Details* model) is
+  superseded by the ASG; if the ASG ever stops pulling its weight, the original
+  standalone + `RecoverInstance`-alarm design in the *Decision* section is the
+  fallback.
 
 ## Open questions
 
-1. **Migrate existing EFS data onto the new EBS volume, or start fresh?** Default
-   proposed: fresh (the corrupt SQLite DBs are the thing being escaped). Confirm
-   before the cycle.
-2. **Standalone instance now vs. ASG from the start?** Default proposed:
-   standalone + `RecoverInstance` alarm (minimal delta); ASG+reattach as a
-   follow-up hardening. Confirm appetite for v1.
-3. **Task CPU on the new host** — `1024` (recommended, leaves host headroom) vs.
-   keep `2048` and size up to `t4g.xlarge`? Default proposed: `1024` + `t4g.large`.
+_All resolved at integration-cycle kickoff (2026-07-13); see the Revision
+block at the top for the full rationale._
+
+1. **Migrate existing EFS data onto the new EBS volume, or start fresh?** →
+   **Fresh.** The suspect WAL-corrupted `state.db`/`kanban.db` are the thing
+   being escaped; sessions/memories are regenerable. The EBS volume starts
+   empty.
+2. **Standalone instance now vs. ASG from the start?** → **ASG
+   `min=max=desired=1`.** Covers AWS-initiated instance retirement
+   (a standalone instance + `RecoverInstance` alarm does not). See Revision §2.
+3. **Task CPU on the new host** → **`1024` CPU on `t4g.large`** (reserves a full
+   vCPU for the host; the claw is inference-via-API, CPU-light).

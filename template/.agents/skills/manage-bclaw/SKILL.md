@@ -1,8 +1,8 @@
 ---
 name: manage-bclaw
 description: >
-  Manage a running ECS Fargate bclaw. Three modes: (1) Overlay — push the
-  repo's agent_home/ onto the bclaw's ~/.hermes (EFS-backed) to update config,
+  Manage a running ECS (EC2 launch type) bclaw. Three modes: (1) Overlay — push the
+  repo's agent_home/ onto the bclaw's ~/.hermes (EBS-backed) to update config,
   skills, memories, system prompt, or personas without a redeploy (via ECS
   Exec); (2) Run — execute arbitrary commands on the live bclaw for inspection,
   debugging, or one-off operations (via ECS Exec); (3) Upgrade image — roll
@@ -11,9 +11,9 @@ description: >
   Companion to setup-bclaw / teardown-bclaw.
 ---
 
-# Manage Harness ECS Fargate
+# Manage Harness ECS on EC2
 
-Manage a live ECS Fargate claw. This skill handles three related tasks:
+Manage a live ECS (EC2 launch type) claw. This skill handles three related tasks:
 
 1. **Overlay** (default) — push the repo's `agent_home/` onto the claw's
    `~/.hermes` to update curated state (config, skills, memories, prompts,
@@ -25,7 +25,9 @@ Manage a live ECS Fargate claw. This skill handles three related tasks:
 3. **Upgrade image** — roll the running claw onto a new
    `ghcr.io/boldblackai/harness` tag by bumping the `HarnessImageTag` stack
    parameter and redeploying. No image rebuild (the signed upstream image is
-   used as-is); ECS performs a rolling deployment. This is a CloudFormation
+   used as-is); ECS performs a recreate deployment (stop-old-then-start-new —
+   the claw is single-replica and binds the Slack socket, so two tasks can't
+   coexist; ~10-20s downtime during the swap). This is a CloudFormation
    stack update, not an ECS Exec operation.
 
 Modes 1 and 2 share the same prerequisites and ECS Exec transport (the
@@ -139,7 +141,7 @@ missing "Session Manager plugin", install it (Prerequisites §3).
 ## Mode 1: Overlay — push agent_home/ onto ~/.hermes
 
 Overlays the repo's `agent_home/` directory onto the running claw's
-`/home/harness/.hermes` — the EFS-backed home directory that persists config,
+`/home/harness/.hermes` — the EBS-backed home directory that persists config,
 skills, memories, sessions, and plugins across task restarts.
 
 ### What "overlay" means
@@ -161,10 +163,10 @@ per-run decision.
 
 ### Transport: tar + base64 over ECS Exec
 
-There is no shared filesystem between the deployer machine and the Fargate task,
-and the deployer has no direct NFS access to the EFS mount target (it lives in
-the claw's private subnet, behind a security group that only allows
-self-referenced NFS). The transfer therefore goes over **ECS Exec** (SSM Session
+There is no shared filesystem between the deployer machine and the ECS task,
+and the deployer has no direct access to the container instance's `/data`
+volume (the instance lives in the claw's VPC behind an inbound-less security
+group). The transfer therefore goes over **ECS Exec** (SSM Session
 Manager, already enabled by the setup template's `EnableExecuteCommand: true`):
 locally tar+gzip+base64 the `agent_home/` tree, ship the base64 to the container
 in chunks via `aws ecs execute-command`, then decode + extract + fix ownership
@@ -269,8 +271,8 @@ explicit confirmation before Phase 3.
 Ship the base64 payload to the container in chunks, verify the staged length
 matches locally, then decode + extract + fix ownership. The exec session runs as
 **root**, so `chown -R 1000:1000` is required after extraction — without it the
-non-root gateway (uid/gid 1000) can't modify or delete the files later (EFS
-honors POSIX ownership).
+non-root gateway (uid/gid 1000) can't modify or delete the files later (the EBS
+volume honors POSIX ownership).
 
 ```bash
 DEST_B64=/tmp/.ah_update.b64          # staging path on the container
@@ -419,7 +421,7 @@ aws ecs execute-command --cluster "$CLAW_NAME" --task "$TASK_ARN" \
   --command "sh -c 'ls -lt /home/harness/.hermes/logs/ 2>/dev/null | head; tail -50 /home/harness/.hermes/logs/*.log 2>/dev/null'" \
   --region "$AWS_REGION"
 
-# Check disk usage on EFS mount
+# Check disk usage on the EBS-backed bind-mount
 aws ecs execute-command --cluster "$CLAW_NAME" --task "$TASK_ARN" \
   --container hermes --interactive \
   --command "sh -c 'df -h /home/harness'" \
@@ -466,7 +468,7 @@ Roll the running claw onto a new `ghcr.io/boldblackai/harness` tag. The image
 tag is a CloudFormation parameter (`HarnessImageTag`, default e.g.
 `hermes-1.9.1`); bumping it and redeploying creates a new task-definition
 revision and ECS rolls the task — **no image rebuild** (the signed upstream
-image is used as-is). EFS-backed state (sessions, memories, `~/.config/gh`)
+image is used as-is). EBS-backed state (sessions, memories, `~/.config/gh`)
 survives the roll; only the container image changes.
 
 **Gate: shell state active (mise + direnv + AWS creds); `CLAW_NAME` +
@@ -565,9 +567,13 @@ aws cloudformation deploy \
 > optional (the new default applies) — but passing it explicitly is harmless
 > and self-documenting, so prefer it.
 
-This creates a new task-definition revision (the image changed) and ECS begins
-a rolling deployment: start a replacement task, wait for `RUNNING`, then drain
-and stop the old task.
+This creates a new task-definition revision (the image changed). Because the
+service is configured `MinimumHealthyPercent: 0` (MaximumPercent stays at the
+ECS-required 200), ECS performs a RECREATE deployment: it can't place the new
+task alongside the old one (single t4g.large, and the claw binds the Slack
+socket so two tasks must never coexist), so it stops the old task first (min 0
+permits 0 running), then places the new one. Expect ~10-20s of bot downtime
+during the swap; EBS state (sessions/memories/SQLite DBs) survives untouched.
 
 ### Step 5: Wait for the roll, then verify
 
@@ -601,16 +607,16 @@ aws logs tail "/ecs/${CLAW_NAME}" --region "$AWS_REGION" --follow
 ### Rollback
 
 If the new image is bad, re-run this mode with the previous tag
-(`HarnessImageTag=<old-tag>`). EFS state survives — only the image rolls back.
+(`HarnessImageTag=<old-tag>`). EBS state survives — only the image rolls back.
 
 ---
 
 ## Notes
 
 - **Exec runs as root.** `aws ecs execute-command` opens a **root** shell (see
-  the setup skill's Phase 6 note). Files written or modified by exec are owned
+  the setup skill's Phase 5 note). Files written or modified by exec are owned
   by root unless you `chown -R 1000:1000` afterward. Without it the non-root
-  gateway can't later modify or delete those files (EFS honors POSIX ownership).
+  gateway can't later modify or delete those files (the EBS volume honors POSIX ownership).
   Use `runuser -u harness --` to run commands as the workload user (uid 1000)
   when file ownership matters.
 
@@ -652,7 +658,7 @@ If the new image is bad, re-run this mode with the previous tag
   parts of it from env. Overlay `config.yaml` only for keys that are **not**
   env-driven (e.g. skills, toolsets, MCP servers, model overrides). For
   env-driven keys (API keys, Slack config), update the SSM parameters instead
-  (see the setup skill's Phase 3 / Phase 6a token-rotation recipe).
+  (see the setup skill's Phase 3 / Phase 5a token-rotation recipe).
 
 - **Idempotent.** Running the overlay mode twice with the same `agent_home/` is a
   no-op (identical files overwrite themselves). Safe to re-run after fixing a
@@ -674,12 +680,13 @@ If the new image is bad, re-run this mode with the previous tag
   Modes 1 (Overlay) and 2 (Run) mutate or inspect the live claw without
   touching the CloudFormation stack or task definition; Mode 3 (Upgrade image)
   performs an in-place stack update that re-renders the task definition and
-  triggers an ECS rolling deployment.
+  triggers an ECS recreate deployment.
 
 - **Image upgrades are stack updates, not overlays.** Mode 3 bumps
   `HarnessImageTag` (a CloudFormation parameter, default e.g. `hermes-1.9.1`)
-  and redeploys, creating a new task-definition revision; ECS rolls the task.
-  It does not touch EFS state — sessions, memories, and `~/.config/gh` survive.
+  and redeploys, creating a new task-definition revision; ECS recreates the
+  task (stop-old-then-start-new).
+  It does not touch EBS state — sessions, memories, and `~/.config/gh` survive.
   Persist the new tag by editing the `Default` in the repo's `template.yaml`
   (commit it like any version bump), or pass it as a one-off
   `--parameter-overrides` value. On any stack update you MUST re-pass every
