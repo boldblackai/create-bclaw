@@ -27,27 +27,32 @@ You can use web-search-prime to look things up that aren't obvious in the reposi
 
 ## Deploy
 
-- Deploys to **AWS ECS Fargate**, managed by the
-  `setup-bclaw` / `teardown-bclaw` agent skills
-  in `.agents/skills/`. The CloudFormation template lives alongside the setup
+- Deploys to **AWS ECS (EC2 launch type)** — a single container instance in an
+  Auto Scaling Group (`min=max=desired=1`) with a persistent **EBS data volume** —
+  managed by the `setup-bclaw` / `teardown-bclaw` agent skills in
+  `.agents/skills/`. The CloudFormation template lives alongside the setup
   skill at `.agents/skills/setup-bclaw/template.yaml`.
 - No derived image is built. The signed upstream
-  `ghcr.io/boldblackai/harness` image is deployed as-is — EFS supports the
-  4-way mount layout directly, so no custom `Dockerfile`/`entrypoint.sh` are
-  needed.
+  `ghcr.io/boldblackai/harness` image is deployed as-is — host bind-mounts on
+  the EBS volume support the 4-way mount layout directly, so no custom
+  `Dockerfile`/`entrypoint.sh` are needed.
 - See `README.md` for prerequisites (tooling, AWS creds, IAM, secrets).
 
 ### AWS infrastructure
 
 - Stack name = claw name (default `bclaw`), region `us-east-1`.
-- Dedicated VPC (10.0.0.0/16) with 2 public subnets across 2 AZs so Fargate
-  can pick an ARM64-capable one (~20% cheaper). The setup skill probes
-  Graviton AZ availability via `describe-instance-type-offerings` and passes
-  the best two to the stack.
-- EFS file system with 4 access points (uid/gid 1000 = the `harness` user),
-  one per persisted path (`.hermes`, `.config`, mise data/state). Retained on
-  stack delete (`DeletionPolicy: Retain`); the teardown skill deletes it
-  explicitly after confirmation.
+- Dedicated VPC (10.0.0.0/16) with **1 public subnet in a single AZ** (EBS is
+  zonal, so the volume, instance, and task all live in one AZ). The setup skill
+  probes Graviton AZ availability via `describe-instance-type-offerings` and
+  passes one ARM64-capable AZ to the stack.
+- **Persistent EBS data volume** (gp3, retained) mounted at `/data`, surfaced
+  into the container as 4 host bind-mounts (`.hermes`, `.config`, mise
+  data/state) owned by the `harness` user (uid/gid 1000). The volume is
+  standalone + `DeletionPolicy: Retain`; the instance's UserData finds it by
+  baked ID (CFN injects the volume ID into the launch template), attaches it,
+  and mounts it by filesystem label on every boot, so data survives ASG instance
+  replacement. SQLite's WAL mode needs a real local block device (it is unsafe
+  on NFS), which is the reason state is on EBS.
 - Secrets are **SSM SecureString** parameters under the claw's `/bclaw/KEY`
   namespace, written by the user in setup Phase 3 (piranesi pattern). Not
   stack-owned, so they survive stack updates/deletes. 4 always-required params: `SLACK_BOT_TOKEN`,
@@ -56,11 +61,16 @@ You can use web-search-prime to look things up that aren't obvious in the reposi
   on-boot `gh auth login --with-token` in the container `Command`; skipped when
   disabled), and exactly one inference-provider key: `OPENROUTER_API_KEY`
   (recommended), `ANTHROPIC_API_KEY`, or `ZAI_API_KEY`.
-- The ECS service's `DesiredCount` is a parameter (default `1`); the setup skill
-  passes `0` on the first deploy (before the SSM params exist, so the gateway
-  doesn't crash-loop on missing env vars) then scales to 1. The default is `1`
-  so a stack update that omits it keeps the claw running instead of taking it
-  down.
+- The task uses **host networking** (it shares the container instance's ENI,
+  which has a public IP for outbound to Slack/ghcr/SSM — no NAT gateway). The
+  security group is inbound-less.
+- The ECS service is **single-replica** (`DesiredCount` parameter, default `1`)
+  with `DeploymentConfiguration: MinimumHealthyPercent: 0` — two tasks can
+  never coexist (they'd fight over the Slack socket), so deployments are
+  **recreate** (stop-old-then-start-new, ~10-20s downtime). The setup skill
+  passes `DesiredCount=0` on the first deploy (before the SSM params exist, so
+  the gateway doesn't crash-loop on missing env vars) then scales to 1. The
+  default is `1` so a stack update that omits it keeps the claw running.
 - `EnableExecuteCommand: true` → shell-in via `aws ecs execute-command` (SSM
-  Session Manager). Exec sessions run as **root**; use
-  `runuser -u harness --` to act as the workload user (uid 1000).
+  Session Manager) over the host's internet path. Exec sessions run as **root**;
+  use `runuser -u harness --` to act as the workload user (uid 1000).

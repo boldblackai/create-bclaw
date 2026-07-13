@@ -1,24 +1,22 @@
 ---
 name: teardown-bclaw
 description: >
-  Tears down a Hermes Agent bclaw on ECS Fargate and all associated AWS
-  resources. Follows a reverse-order sequence: scale to 0 → delete
-  CloudFormation stack → delete retained EFS → delete orphaned VPC → delete
-  SSM secrets. Use when
-  asked to destroy, teardown, or decommission the bclaw. Companion to
-  setup-bclaw.
+  Tears down a Hermes Agent bclaw on ECS (EC2 launch type) and all associated
+  AWS resources. Follows a reverse-order sequence: scale to 0 → delete
+  CloudFormation stack (VPC, EBS volume [retained], ASG, ECS, IAM) → delete SSM
+  secrets. Use when asked to destroy, teardown, or decommission the bclaw.
+  Companion to setup-bclaw.
 ---
 
-# Teardown Harness ECS Fargate
+# Teardown Harness ECS on EC2
 
-Tears down a Hermes Agent claw on ECS Fargate. Follows the reverse order of
-setup so dependencies delete cleanly without orphans. The CloudFormation stack
-owns the VPC, EFS, ECS service/task/cluster, IAM roles, and log group —
-deleting the stack removes all of them. Two resources survive a stack delete
-and need explicit cleanup: EFS data is retained by `DeletionPolicy: Retain`
-(Phase 3), and the VPC plus networking can be skipped when the stack delete
-hits `FORCE_DELETE_STACK` (Phase 4). SSM secrets are not stack-owned and are
-deleted separately.
+Tears down a Hermes Agent claw on ECS (EC2 launch type). Follows the reverse
+order of setup so dependencies delete cleanly without orphans. The
+CloudFormation stack owns the VPC, the ASG + container instance, the ECS
+service/task/cluster, IAM roles (exec, task, container instance + instance
+profile), the log group, and the standalone EBS data volume. The EBS volume is
+retained by the stack's `DeletionPolicy: Retain` and must be deleted explicitly.
+SSM secrets are not stack-owned and are deleted separately.
 
 ## Prerequisites
 
@@ -35,8 +33,8 @@ eval "$(/usr/local/bin/mise activate bash)" \
 All `aws` commands in this skill assume this shell state.
 
 **Confirm intent.** Use `ask_user_question` to confirm the user wants to
-destroy the claw. This is destructive and irreversible — all EFS data
-(sessions, memories, skills, the faster-whisper model cache, gh credentials)
+destroy the claw. This is destructive and irreversible — all EBS data
+(sessions, memories, skills, the SQLite databases, gh credentials)
 will be lost unless the user backs it up first.
 
 Also collect the **claw name** (default `bclaw`) and **region** (default
@@ -121,11 +119,11 @@ aws ecs stop-task \
 **Gate: service is at 0 running tasks.**
 
 Delete the stack. This removes the service, task definition family's inactive
-revisions, cluster, IAM roles (exec + task), log group, EFS access points +
-mount targets + file system (subject to the retain policy — see Phase 3),
-security group, subnets, route table, internet gateway, and VPC. If the stack
-delete skipped the networking (the `FORCE_DELETE_STACK` path can, when EFS
-mount-target ENIs block subnet deletion), Phase 4 sweeps the orphaned VPC.
+revisions, cluster, IAM roles (exec + task + container instance), instance
+profile, log group, launch template, Auto Scaling Group (terminating the
+container instance), security group, subnet, route table, internet gateway, and
+VPC. The standalone EBS volume is left behind (subject to the retain policy —
+see Phase 3).
 
 ```bash
 aws cloudformation delete-stack \
@@ -143,103 +141,107 @@ aws cloudformation wait stack-delete-complete \
 
 **Common delete failures and how to force-clean them:**
 
-- **`DELETE_FAILED`: CloudFormation can't confirm deletion of already-gone
-  resources.** The stack delete can fail not because a resource still exists,
-  but because CloudFormation's handler can't confirm a resource that's already
-  gone. Two manifestations observed on this deployer policy:
-  - **EFS mount targets (403).** The handler fails to clear them even though
-    direct CLI calls (`describe-mount-targets`, `delete-file-system`) succeed
-    under the same principal — EFS delete permissions are tag-conditioned
-    (`aws:ResourceTag/Name: bclaw-data`) and don't evaluate identically through
-    CloudFormation's handler. Verify they're gone with
-    `aws efs describe-mount-targets` per FS (deployer CAN do this via CLI).
-  - **IAM roles (`NoSuchEntity`).** The exec/task roles (`bclaw-*`) can be
-    deleted out from under the handler (e.g. a prior partial teardown), so the
-    handler 404s confirming a resource that no longer exists. Verify with
-    `aws iam get-role` for each `bclaw-*` role (returns `NoSuchEntity` if gone).
+- **`DELETE_FAILED`: CloudFormation can't confirm deletion of a resource.**
+  The stack delete can fail not because a resource still exists, but because
+  CloudFormation's handler can't confirm a resource that's already going away.
+  Two manifestations on this stack:
+  - **ASG / instance still terminating.** Deleting the Auto Scaling Group
+    begins terminating the container instance; the handler can time out before
+    EC2 confirms termination. Verify directly with
+    `aws autoscaling describe-auto-scaling-groups` (should show no instances)
+    and `aws ec2 describe-instances` (instance `shutting-down`/`terminated`).
+    If they're empty/gone but the stack is stuck on handler confirmation,
+    re-run `delete-stack --deletion-mode FORCE_DELETE_STACK`.
+  - **IAM roles (`NoSuchEntity`).** The exec/task/container-instance roles
+    (`bclaw-*`) can be deleted out from under the handler (e.g. a prior partial
+    teardown), so the handler 404s confirming a resource that no longer exists.
+    Verify with `aws iam get-role` for each `bclaw-*` role (returns
+    `NoSuchEntity` if gone).
+
   In both cases the resources are confirmed gone via direct CLI, but the stack
   is stuck on handler confirmation. Fix: re-run `delete-stack` with
   `--deletion-mode FORCE_DELETE_STACK` (requires `cloudformation:DeleteStack`
   with the force capability). This skips resources that fail and continues
   deleting the rest.
 
-- **Multiple retained EFS file systems.** If the stack was updated multiple
-  times, each update may have replaced the EFS resource (creating a new one
-  and retaining the old via `DeletionPolicy: Retain`). Check for ALL file
-  systems tagged `bclaw-data`, not just one, and delete them all in Phase 3.
-
-- **EFS file system retained.** `EFSFileSystem` has `DeletionPolicy: Retain`
-  to protect data, so the stack delete leaves it behind. Phase 3 deletes it
+- **EBS volume retained.** `EbsDataVolume` has `DeletionPolicy: Retain` to
+  protect data, so the stack delete leaves it behind. Phase 3 deletes it
   explicitly after the user confirms. Capture its ID first:
 
   ```bash
-  EFS_ID=$(aws efs describe-file-systems \
+  EBS_ID=$(aws ec2 describe-volumes \
     --region "$AWS_REGION" \
-    --query 'FileSystems[?Tags[?Key==`Name` && Value==`'"${CLAW_NAME}"'-data`]].FileSystemId' \
-    --output text)
-  echo "EFS to delete (Phase 3): $EFS_ID"
+    --filters "Name=tag:Name,Values=${CLAW_NAME}-data" \
+    --query 'Volumes[0].VolumeId' --output text)
+  echo "EBS to delete (Phase 3): $EBS_ID"
   ```
 
-- **Cluster not empty / service still draining.** Re-run Phase 1's
-  `stop-task`, then retry `delete-stack`.
+  > The container instance attaches the data volume at runtime (via the
+  > UserData, not a CloudFormation `VolumeAttachment`), and volumes attached via
+  > the EC2 API default to `DeleteOnTermination=false`. So when the ASG
+  > terminates the instance during stack delete, the volume is **detached but
+  > kept** — it becomes `available` and is left for Phase 3. If you see it still
+  > `in-use` while the instance is mid-termination, Phase 3 waits for it to
+  > detach (or force-detaches).
 
 ---
 
-### Phase 3: Delete the retained EFS file system
+### Phase 3: Delete the retained EBS volume
 
 **Gate: stack is `DELETE_COMPLETE`; user confirms data loss is OK.**
 
-The EFS file system was retained by the stack to protect data. Now delete it.
-First confirm no mount targets remain (the stack delete should have removed
-them, but verify):
+The EBS volume was retained by the stack to protect data. Now delete it. First
+confirm it is no longer attached (the instance termination during stack delete
+should have detached it; if not, force-detach):
 
 ```bash
-aws efs describe-mount-targets \
-  --file-system-id "$EFS_ID" \
-  --region "$AWS_REGION" \
-  --query 'MountTargets[].MountTargetId' --output text
+STATE=$(aws ec2 describe-volumes --region "$AWS_REGION" \
+  --volume-ids "$EBS_ID" --query 'Volumes[0].State' --output text)
+echo "volume state: $STATE"
 ```
 
-If any mount targets are listed, wait for them to delete:
+If `in-use`, the instance may still be terminating — wait for it, or
+force-detach (the deployer policy scopes `ec2:DetachVolume` by
+`aws:ResourceTag/Name: bclaw-data`, which this volume carries):
 
 ```bash
-aws efs wait mount-targets-deleted --file-system-id "$EFS_ID" --region "$AWS_REGION"
+aws ec2 detach-volume --volume-id "$EBS_ID" --region "$AWS_REGION" --force || true
+aws ec2 wait volume-available --volume-id "$EBS_ID" --region "$AWS_REGION"
 ```
 
-Then delete the file system:
+Then delete the volume:
 
 ```bash
-aws efs delete-file-system \
-  --file-system-id "$EFS_ID" \
+aws ec2 delete-volume \
+  --volume-id "$EBS_ID" \
   --region "$AWS_REGION"
 ```
 
-> **Skip this phase** if the user wants to keep EFS data (e.g. for a future
-> redeploy with the same sessions/memories). The file system survives
-> indefinitely; note its ID so setup can re-attach by importing it.
+> **Skip this phase** if the user wants to keep the EBS data (e.g. for a future
+> redeploy). The volume survives indefinitely; note its ID so a future setup
+> can find + reattach it by tag.
 
-> **EFS delete permissions are tag-conditioned, not absent.** The deployer
-> policy scopes EFS delete via `aws:ResourceTag/Name: bclaw*`, so file
-> systems tagged `Name=bclaw-data` (all of them, regardless of which stack
-> version created them) are within scope. Try the `delete-file-system`
-> command directly. If it fails with `AccessDeniedException`, note the file
-> system IDs in the final report for manual console cleanup. To delete
-> multiple retained EFS orphans, loop over all IDs returned by the
-> `describe-file-systems` tag query in Phase 2.
+> **EBS delete permissions are tag-conditioned, not absent.** The deployer
+> policy scopes `ec2:DeleteVolume` via `aws:ResourceTag/Name: bclaw-data`, so
+> volumes tagged `Name=bclaw-data` (all of them, regardless of which stack
+> version created them) are within scope. Try the `delete-volume` command
+> directly. If it fails with `AccessDeniedException`, note the volume IDs in
+> the final report for manual console cleanup. To delete multiple retained
+> orphan volumes (from several stack updates), loop over all IDs returned by
+> the `describe-volumes` tag query in Phase 2.
 
 ---
 
 ### Phase 4: Delete the orphaned VPC and networking
 
-**Gate: stack is `DELETE_COMPLETE` (Phase 2); EFS handled (Phase 3, done or skipped).**
+**Gate: stack is `DELETE_COMPLETE` (Phase 2); EBS handled (Phase 3, done or skipped).**
 
 The VPC, subnets, route table, internet gateway, and security group are
 stack-owned, so a clean stack delete removes them. They survive only when the
 stack delete skipped them — the `FORCE_DELETE_STACK` recovery path skips any
-resource whose delete fails, and the usual cause is EFS mount-target ENIs
-blocking subnet deletion. Once Phase 3 deletes the file system (and with it the
-mount targets + their ENIs), the networking is unblocked and the orphaned VPC
-can be removed.
+resource whose delete fails (a timed-out handler, or a dependency still
+detaching). Once Phase 2 (stack) and Phase 3 (EBS volume) are handled, the only
+remaining orphans are the VPC and its networking.
 
 Find the VPC by its `Name` tag:
 
@@ -302,24 +304,25 @@ aws ec2 delete-vpc --vpc-id "$VPC_ID" --region "$AWS_REGION" \
   && echo "vpc deleted: $VPC_ID" || echo "vpc STILL EXISTS: $VPC_ID"
 ```
 
-> **A lingering network interface blocks the chain.** `delete-subnet` fails with
-> a dependency error if any ENI remains in it. After scaling to 0 (Phase 1) and
-> deleting EFS (Phase 3) there should be none, but a stuck Fargate task ENI can
-> persist. The deployer policy does not grant `ec2:DeleteNetworkInterface` —
-> Fargate ENIs are not claw-tagged, so the action cannot be tag-scoped safely.
-> Delete a stuck ENI from the console, then re-run this sweep.
+> **A lingering network interface blocks the chain.** `delete-subnet` fails
+> with a dependency error if any ENI remains in it. With host networking there
+> is no task ENI (the task shares the instance's ENI), and the ASG terminates
+> the container instance during stack delete — so a stuck ENI is rare and
+> transient (a still-terminating instance). Wait and re-run the sweep. The
+> deployer policy does not grant `ec2:DeleteNetworkInterface`; if an ENI truly
+> won't clear, delete it from the console.
 
-> **The deployer can delete only claw-tagged networking.** Every resource deleted
-> above carries a `Name=bclaw*` tag, which is what the policy's
+> **The deployer can delete only claw-tagged networking.** Every resource
+> deleted above carries a `Name=bclaw*` tag, which is what the policy's
 > `EC2NetworkingManage` statement (`aws:ResourceTag/Name: bclaw*`) keys on. The
-> read-only `Describe*` calls are unscoped, so finding the VPC always works; the
-> deletes succeed only against the claw's own resources.
+> read-only `Describe*` calls are unscoped, so finding the VPC always works;
+> the deletes succeed only against the claw's own resources.
 
 ---
 
 ### Phase 5: Delete the SSM secrets
 
-**Gate: stack deleted (Phase 2); EFS handled (Phase 3, skipped or done).**
+**Gate: stack deleted (Phase 2); EBS handled (Phase 3, skipped or done).**
 
 The SSM parameters are not stack-owned, so they survive the stack delete. Delete
 them now. `ssm delete-parameter` is immediate and irreversible (no recovery
@@ -372,17 +375,11 @@ aws cloudformation describe-stacks \
   --region "$AWS_REGION" 2>&1 | grep -q "does not exist" \
   && echo "stack: gone" || echo "stack: STILL EXISTS"
 
-# No remaining EFS
-aws efs describe-file-systems --region "$AWS_REGION" \
-  --query 'FileSystems[?Tags[?Key==`Name` && Value==`'"${CLAW_NAME}"'-data`]]' \
-  --output text | grep -q . \
-  && echo "efs: STILL EXISTS" || echo "efs: gone"
-
-# No remaining VPC
-aws ec2 describe-vpcs --region "$AWS_REGION" \
-  --filters "Name=tag:Name,Values=${CLAW_NAME}-vpc" \
-  --query 'Vpcs[].VpcId' --output text | grep -q . \
-  && echo "vpc: STILL EXISTS" || echo "vpc: gone"
+# No remaining EBS volumes
+aws ec2 describe-volumes --region "$AWS_REGION" \
+  --filters "Name=tag:Name,Values=${CLAW_NAME}-data" \
+  --query 'Volumes[].VolumeId' --output text | grep -q . \
+  && echo "ebs: STILL EXISTS" || echo "ebs: gone"
 
 # No remaining SSM params
 aws ssm describe-parameters \
@@ -393,8 +390,7 @@ aws ssm describe-parameters \
 
 Report to the user:
 - Stack status (gone)
-- EFS status (gone, or retained ID if they chose to keep it)
-- VPC + networking status (gone, or leftover IDs if an ENI blocked deletion)
+- EBS volume status (gone, or retained ID if they chose to keep it)
 - SSM parameters status (gone)
 - Reminder that the Slack app config (bot/app tokens, allowed users, home
   channel) still exists on the Slack side and can be reused for a future deploy
@@ -403,12 +399,20 @@ Report to the user:
 
 ## Notes
 
-- **EFS `DeletionPolicy: Retain` is deliberate.** The setup template retains
-  the file system on stack delete to protect sessions/memories/skills from
-  accidental loss. This teardown skill deletes it explicitly in Phase 3 only
-  after the user confirms. If you want stack-delete to also nuke EFS, change
-  `DeletionPolicy` to `Delete` in `template.yaml` — but the retain default is
-  safer.
+- **EBS `DeletionPolicy: Retain` is deliberate.** The setup template retains
+  the volume on stack delete to protect sessions/memories/skills/the SQLite
+  databases from accidental loss. This teardown skill deletes it explicitly in
+  Phase 3 only after the user confirms. If you want stack-delete to also nuke
+  the volume, change `DeletionPolicy` to `Delete` in `template.yaml` — but the
+  retain default is safer.
+
+- **The volume is attached by UserData, not by CloudFormation.** Because the
+  container instance is ASG-managed (not a CFN `AWS::EC2::Instance`), the data
+  volume is a standalone retained resource the instance attaches at runtime via
+  its UserData. CFN therefore has no `VolumeAttachment` to delete — on stack
+  delete the ASG terminates the instance (which auto-detaches the
+  `DeleteOnTermination=false` volume), and Phase 3 deletes the now-orphaned
+  volume directly.
 
 - **Task definition revisions are not deleted by `delete-stack`.** ECS keeps
   inactive task definition revisions. `delete-stack` removes the service but
@@ -419,7 +423,7 @@ Report to the user:
 - **SSM has no recovery for `delete-parameter`.** Unlike Secrets Manager
   (7-day recovery window by default), `ssm delete-parameter` is immediate and
   irreversible. If the user might redeploy, have them record the values before
-  Phase 4 — they'll need to re-write them during setup.
+  Phase 5 — they'll need to re-write them during setup.
 
 - **The SSM namespace is hardcoded (`/bclaw/`), not derived from `ClawName`.** Secrets live at
   `/bclaw/<KEY>` so the deployer's IAM policy can be scoped to
@@ -428,8 +432,7 @@ Report to the user:
   set — correct for a full teardown.
 
 - **Order matters.** Always scale to 0 (Phase 1) before deleting the stack
-  (Phase 2). Deleting the stack while the task is running can leave the EFS
-  mount in a busy state, blocking file-system deletion in Phase 3. The VPC
-  sweep (Phase 4) runs after the EFS delete (Phase 3) for the same reason:
-  EFS mount-target ENIs block subnet/VPC deletion until the mount targets are
-  gone.
+  (Phase 2). Deleting the stack while the task is running leaves the container
+  mid-write against the EBS-backed bind-mounts; while the volume is retained
+  either way, a clean task stop flushes SQLite WAL before the volume is
+  detached.

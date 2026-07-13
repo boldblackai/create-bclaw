@@ -31,11 +31,11 @@ to use any that [hermes-agent already supports](https://hermes-agent.nousresearc
 
 ## What you get
 
-* [hermes-agent](https://hermes-agent.nousresearch.com/docs) running on ECS Fargate via our [hardened](https://boldblackai.github.io/harness/security/) [harness](https://github.com/boldblackai/harness) Docker image.
+* [hermes-agent](https://hermes-agent.nousresearch.com/docs) running on AWS ECS (EC2 launch type) — a single container instance in an Auto Scaling Group with a persistent EBS data volume — via our [hardened](https://boldblackai.github.io/harness/security/) [harness](https://github.com/boldblackai/harness) Docker image.
 
 * GitHub & Slack integration
 
-* Persisted and backed up via AWS EFS.
+* SQLite-backed persistent state on a retained gp3 EBS volume (local block storage — SQLite WAL is unsafe on NFS).
 
 
 ## Usage
@@ -49,10 +49,11 @@ npm init @boldblackai/bclaw <name>
 If no name is given (and stdin is a TTY), you'll be prompted for one.
 
 `<name>` must match `^[a-zA-Z]([a-zA-Z0-9-]*[a-zA-Z0-9])?$` and be 1–59 characters. It becomes
-the CloudFormation stack name, IAM role prefix (`<name>-exec`, `<name>-task`),
-ECS cluster/service, log group, SSM namespace (`/<name>/`), KMS alias
-(`alias/<name>-ssm`), and EFS tag (`<name>-data`). The 59-char ceiling keeps the
-`-exec`/`-task` role suffixes under IAM's 64-char role-name limit.
+the CloudFormation stack name, IAM role prefix (`<name>-exec`, `<name>-task`,
+`<name>-instance`), ECS cluster/service, log group, SSM namespace (`/<name>/`),
+KMS alias (`alias/<name>-ssm`), and EBS volume tag (`<name>-data`). The
+59-char ceiling keeps the `-exec`/`-task`/`-instance` role suffixes under
+IAM's 64-char role-name limit.
 
 ### Options
 

@@ -5,23 +5,46 @@
       "Sid": "CloudFormation",
       "Effect": "Allow",
       "Action": [
-        "cloudformation:CreateStack", "cloudformation:UpdateStack", "cloudformation:DeleteStack",
+        "cloudformation:CreateStack",
+        "cloudformation:UpdateStack",
+        "cloudformation:DeleteStack",
         "cloudformation:ContinueUpdateRollback",
-        "cloudformation:DescribeStacks", "cloudformation:DescribeStackEvents",
+        "cloudformation:DescribeStacks",
+        "cloudformation:DescribeStackEvents",
+        "cloudformation:DescribeStackResources",
         "cloudformation:DescribeChangeSet",
-        "cloudformation:GetTemplate", "cloudformation:GetTemplateSummary",
+        "cloudformation:GetTemplate",
+        "cloudformation:GetTemplateSummary",
         "cloudformation:CreateChangeSet",
-        "cloudformation:ExecuteChangeSet", "cloudformation:DeleteChangeSet"
+        "cloudformation:ExecuteChangeSet",
+        "cloudformation:DeleteChangeSet"
       ],
       "Resource": "arn:aws:cloudformation:*:*:stack/bclaw/*"
     },
     {
-      "Sid": "EC2Describe",
+      "Sid": "ReadOnlyDescribe",
       "Effect": "Allow",
       "Action": [
-        "ec2:DescribeVpcs", "ec2:DescribeSubnets", "ec2:DescribeRouteTables",
-        "ec2:DescribeSecurityGroups", "ec2:DescribeInternetGateways",
-        "ec2:DescribeAvailabilityZones", "ec2:DescribeInstanceTypeOfferings", "ec2:DescribeTags"
+        "ec2:DescribeVpcs",
+        "ec2:DescribeSubnets",
+        "ec2:DescribeRouteTables",
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeInternetGateways",
+        "ec2:DescribeAvailabilityZones",
+        "ec2:DescribeInstanceTypeOfferings",
+        "ec2:DescribeTags",
+        "ec2:DescribeVolumes",
+        "ec2:DescribeLaunchTemplates",
+        "ec2:DescribeLaunchTemplateVersions",
+        "ec2:DescribeImages",
+        "ec2:DescribeInstances",
+        "autoscaling:DescribeAutoScalingGroups",
+        "autoscaling:DescribeAutoScalingInstances",
+        "autoscaling:DescribeTags",
+        "autoscaling:DescribeScalingActivities",
+        "logs:DescribeLogGroups",
+        "ssm:DescribeParameters",
+        "ecs:ListContainerInstances"
       ],
       "Resource": "*"
     },
@@ -29,8 +52,12 @@
       "Sid": "EC2NetworkingCreate",
       "Effect": "Allow",
       "Action": [
-        "ec2:CreateVpc", "ec2:CreateInternetGateway", "ec2:CreateSubnet",
-        "ec2:CreateRouteTable", "ec2:CreateSecurityGroup", "ec2:CreateTags"
+        "ec2:CreateVpc",
+        "ec2:CreateInternetGateway",
+        "ec2:CreateSubnet",
+        "ec2:CreateRouteTable",
+        "ec2:CreateSecurityGroup",
+        "ec2:CreateTags"
       ],
       "Resource": "*"
     },
@@ -38,75 +65,151 @@
       "Sid": "EC2NetworkingManage",
       "Effect": "Allow",
       "Action": [
-        "ec2:DeleteVpc", "ec2:ModifyVpcAttribute",
-        "ec2:DeleteInternetGateway", "ec2:AttachInternetGateway", "ec2:DetachInternetGateway",
-        "ec2:DeleteSubnet", "ec2:ModifySubnetAttribute",
-        "ec2:DeleteRouteTable", "ec2:AssociateRouteTable", "ec2:DisassociateRouteTable",
-        "ec2:CreateRoute", "ec2:DeleteRoute",
-        "ec2:DeleteSecurityGroup", "ec2:AuthorizeSecurityGroupIngress", "ec2:RevokeSecurityGroupIngress",
+        "ec2:DeleteVpc",
+        "ec2:ModifyVpcAttribute",
+        "ec2:DeleteInternetGateway",
+        "ec2:AttachInternetGateway",
+        "ec2:DetachInternetGateway",
+        "ec2:DeleteSubnet",
+        "ec2:ModifySubnetAttribute",
+        "ec2:DeleteRouteTable",
+        "ec2:AssociateRouteTable",
+        "ec2:DisassociateRouteTable",
+        "ec2:CreateRoute",
+        "ec2:DeleteRoute",
+        "ec2:DeleteSecurityGroup",
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:RevokeSecurityGroupIngress",
         "ec2:DeleteTags"
       ],
       "Resource": "*",
       "Condition": {
-        "StringLike": { "aws:ResourceTag/Name": "bclaw*" }
+        "StringLike": {
+          "aws:ResourceTag/Name": "bclaw*"
+        }
       }
     },
     {
-      "Sid": "EFSManage",
+      "Sid": "EC2DataVolumeCreate",
+      "Effect": "Allow",
+      "Action": "ec2:CreateVolume",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/Name": "bclaw-data"
+        }
+      }
+    },
+    {
+      "Sid": "EC2DataVolumeManage",
       "Effect": "Allow",
       "Action": [
-        "elasticfilesystem:DeleteFileSystem",
-        "elasticfilesystem:CreateMountTarget", "elasticfilesystem:DeleteMountTarget",
-        "elasticfilesystem:DescribeMountTargets",
-        "elasticfilesystem:CreateAccessPoint", "elasticfilesystem:DeleteAccessPoint",
-        "elasticfilesystem:CreateTags", "elasticfilesystem:TagResource"
+        "ec2:DeleteVolume",
+        "ec2:DetachVolume"
       ],
       "Resource": "*",
       "Condition": {
-        "StringEquals": { "aws:ResourceTag/Name": "bclaw-data" }
+        "StringEquals": {
+          "aws:ResourceTag/Name": "bclaw-data"
+        }
       }
     },
     {
-      "Sid": "EFSFileSystemCreate",
-      "Effect": "Allow",
-      "Action": ["elasticfilesystem:CreateFileSystem"],
-      "Resource": "*",
-      "Condition": {
-        "StringEquals": { "aws:RequestTag/Name": "bclaw-data" }
-      }
-    },
-    {
-      "Sid": "EFSDescribe",
+      "Sid": "EC2LaunchTemplateManage",
       "Effect": "Allow",
       "Action": [
-        "elasticfilesystem:DescribeFileSystems", "elasticfilesystem:DescribeAccessPoints"
+        "ec2:CreateLaunchTemplate",
+        "ec2:CreateLaunchTemplateVersion",
+        "ec2:DeleteLaunchTemplate",
+        "ec2:ModifyLaunchTemplate",
+        "ec2:GetLaunchTemplateData",
+        "ec2:RunInstances",
+        "ec2:CreateTags"
       ],
       "Resource": "*"
+    },
+    {
+      "Sid": "AutoScalingCreate",
+      "Effect": "Allow",
+      "Action": "autoscaling:CreateAutoScalingGroup",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/ClawName": "bclaw"
+        }
+      }
+    },
+    {
+      "Sid": "AutoScalingManage",
+      "Effect": "Allow",
+      "Action": [
+        "autoscaling:DeleteAutoScalingGroup",
+        "autoscaling:UpdateAutoScalingGroup",
+        "autoscaling:CreateOrUpdateTags",
+        "autoscaling:DeleteTags"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/ClawName": "bclaw"
+        }
+      }
+    },
+    {
+      "Sid": "CreateAutoScalingServiceLinkedRole",
+      "Effect": "Allow",
+      "Action": "iam:CreateServiceLinkedRole",
+      "Resource": "arn:aws:iam::*:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling*"
     },
     {
       "Sid": "IAMRoles",
       "Effect": "Allow",
       "Action": [
-        "iam:CreateRole", "iam:DeleteRole", "iam:GetRole", "iam:GetRolePolicy",
-        "iam:PutRolePolicy", "iam:DeleteRolePolicy",
-        "iam:AttachRolePolicy", "iam:DetachRolePolicy",
-        "iam:ListRolePolicies", "iam:ListAttachedRolePolicies"
+        "iam:CreateRole",
+        "iam:DeleteRole",
+        "iam:GetRole",
+        "iam:GetRolePolicy",
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy",
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy",
+        "iam:ListRolePolicies",
+        "iam:ListAttachedRolePolicies"
       ],
       "Resource": "arn:aws:iam::*:role/bclaw-*"
     },
     {
-      "Sid": "PassRoleToECS",
+      "Sid": "IAMInstanceProfiles",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateInstanceProfile",
+        "iam:DeleteInstanceProfile",
+        "iam:GetInstanceProfile",
+        "iam:AddRoleToInstanceProfile",
+        "iam:RemoveRoleFromInstanceProfile"
+      ],
+      "Resource": "arn:aws:iam::*:instance-profile/bclaw-*"
+    },
+    {
+      "Sid": "PassRole",
       "Effect": "Allow",
       "Action": "iam:PassRole",
-      "Resource": "arn:aws:iam::*:role/bclaw-*",
-      "Condition": { "StringEquals": { "iam:PassedToService": "ecs-tasks.amazonaws.com" } }
+      "Resource": [
+        "arn:aws:iam::*:role/bclaw-*",
+        "arn:aws:iam::*:instance-profile/bclaw-*"
+      ]
     },
     {
       "Sid": "ECSScoped",
       "Effect": "Allow",
       "Action": [
-        "ecs:CreateCluster", "ecs:DeleteCluster", "ecs:DescribeClusters",
-        "ecs:CreateService", "ecs:DeleteService", "ecs:UpdateService", "ecs:DescribeServices"
+        "ecs:CreateCluster",
+        "ecs:DeleteCluster",
+        "ecs:DescribeClusters",
+        "ecs:CreateService",
+        "ecs:DeleteService",
+        "ecs:UpdateService",
+        "ecs:DescribeServices"
       ],
       "Resource": [
         "arn:aws:ecs:*:*:cluster/bclaw",
@@ -143,8 +246,11 @@
       "Sid": "ECSTaskDefsAndTasks",
       "Effect": "Allow",
       "Action": [
-        "ecs:RegisterTaskDefinition", "ecs:DeregisterTaskDefinition",
-        "ecs:DescribeTaskDefinition", "ecs:DescribeTasks", "ecs:ListTasks"
+        "ecs:RegisterTaskDefinition",
+        "ecs:DeregisterTaskDefinition",
+        "ecs:DescribeTaskDefinition",
+        "ecs:DescribeTasks",
+        "ecs:ListTasks"
       ],
       "Resource": "*"
     },
@@ -152,57 +258,68 @@
       "Sid": "LogsScoped",
       "Effect": "Allow",
       "Action": [
-        "logs:CreateLogGroup", "logs:DeleteLogGroup", "logs:PutLogEvents",
-        "logs:CreateLogStream", "logs:DescribeLogStreams", "logs:PutRetentionPolicy",
-        "logs:FilterLogEvents", "logs:GetLogEvents"
+        "logs:CreateLogGroup",
+        "logs:DeleteLogGroup",
+        "logs:PutLogEvents",
+        "logs:CreateLogStream",
+        "logs:DescribeLogStreams",
+        "logs:PutRetentionPolicy",
+        "logs:FilterLogEvents",
+        "logs:GetLogEvents"
       ],
       "Resource": "arn:aws:logs:*:*:log-group:/ecs/bclaw*"
-    },
-    {
-      "Sid": "LogsDescribe",
-      "Effect": "Allow",
-      "Action": "logs:DescribeLogGroups",
-      "Resource": "*"
     },
     {
       "Sid": "SSMSecrets",
       "Effect": "Allow",
       "Action": [
-        "ssm:PutParameter", "ssm:GetParameter", "ssm:GetParameters",
+        "ssm:PutParameter",
+        "ssm:GetParameter",
+        "ssm:GetParameters",
         "ssm:DeleteParameter"
       ],
       "Resource": "arn:aws:ssm:*:*:parameter/bclaw/*"
     },
     {
-      "Sid": "SSMDescribe",
+      "Sid": "SSMPublicEcsAmi",
       "Effect": "Allow",
-      "Action": "ssm:DescribeParameters",
-      "Resource": "*"
+      "Action": [
+        "ssm:GetParameter",
+        "ssm:GetParameters"
+      ],
+      "Resource": "arn:aws:ssm:*:*:parameter/aws/service/ecs/optimized-ami/*"
     },
     {
       "Sid": "KMSCreateKey",
       "Effect": "Allow",
-      "Action": ["kms:CreateKey", "kms:CreateAlias", "kms:DeleteAlias", "kms:PutKeyPolicy", "kms:EnableKeyRotation", "kms:DescribeKey"],
+      "Action": [
+        "kms:CreateKey",
+        "kms:CreateAlias",
+        "kms:DeleteAlias",
+        "kms:PutKeyPolicy",
+        "kms:EnableKeyRotation",
+        "kms:DescribeKey",
+        "sts:DecodeAuthorizationMessage"
+      ],
       "Resource": "*"
     },
     {
       "Sid": "KMSUseKey",
       "Effect": "Allow",
       "Action": [
-        "kms:Decrypt", "kms:Encrypt", "kms:DescribeKey", "kms:ScheduleKeyDeletion"
+        "kms:Decrypt",
+        "kms:Encrypt",
+        "kms:ScheduleKeyDeletion"
       ],
       "Resource": "*",
       "Condition": {
         "ForAnyValue:StringLike": {
           "kms:ResourceAliases": "alias/bclaw-ssm"
+        },
+        "StringEquals": {
+          "kms:ViaService": "ssm.us-east-1.amazonaws.com"
         }
       }
-    },
-    {
-      "Sid": "SimulateSelf",
-      "Effect": "Allow",
-      "Action": "iam:SimulatePrincipalPolicy",
-      "Resource": "arn:aws:iam::*:user/${aws:username}"
     }
   ]
 }

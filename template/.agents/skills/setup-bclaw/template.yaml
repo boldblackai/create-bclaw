@@ -1,17 +1,20 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  Hermes Agent claw on ECS Fargate — dedicated VPC, EFS-backed persistent
-  state (4 access points mirroring the harness CLI bind-mounts), SSM-backed
-  secrets, and a single-replica Fargate service with ECS Exec
-  (SSM Session Manager) shell-in. ARM64 by default (~20% cheaper).
+  Hermes Agent claw on ECS (EC2 launch type) — dedicated VPC, a persistent
+  EBS data volume mounted at /data (4 host bind-mounts mirroring the harness
+  CLI bind-mounts), SSM-backed secrets, and a single-replica ECS service on an
+  Auto Scaling Group (min=max=desired=1) with ECS Exec (SSM Session Manager)
+  shell-in. ARM64 by default (Graviton). Signed upstream image, as-is; the bot
+  is a Slack socket-mode bot (outbound-only, no LB, no inbound ports).
 
-  Uses the signed upstream harness image as-is (no derived image). The
-  service is a Slack socket-mode bot, so it is outbound-only — no load
-  balancer, no inbound ports (the SG only allows self-referenced NFS for EFS).
+  Storage: the claw's SQLite databases (state.db, kanban.db) need a real local
+  block device — SQLite WAL is unsafe on NFS, so state is on a local block
+  device (EBS), not a network filesystem. A standalone, retained gp3 EBS volume
+  (DeletionPolicy/UpdateReplacePolicy: Retain) lives in one AZ; the ASG's
+  UserData finds it by tag, attaches it, and mounts it by label on every boot,
+  so data survives instance replacement. Single-AZ is the cost of zonal EBS.
 
-  Managed by the setup-bclaw / teardown-bclaw
-  agent skills. See docs/deploying/aws.md (Option A) in the harness repo for
-  the manual equivalent.
+  Managed by the setup-bclaw / teardown-bclaw agent skills.
 
 # ── Parameters ──────────────────────────────────────────────────────────────
 
@@ -21,7 +24,7 @@ Parameters:
     Default: bclaw
     Description: >
       Name of the claw. Prefixed onto every resource (cluster, log group,
-      IAM roles, EFS tags).
+      IAM roles, EBS volume tags).
     MinLength: 1
     MaxLength: 59
     AllowedPattern: "^[a-zA-Z]([a-zA-Z0-9-]*[a-zA-Z0-9])?$"
@@ -39,22 +42,47 @@ Parameters:
     Default: ARM64
     AllowedValues: [ARM64, X86_64]
     Description: >
-      ARM64 is ~20% cheaper on Fargate and the harness image is published
-      multi-arch. Switch to X86_64 only if your account/region lacks ARM64
-      capacity. ARM64 placement is handled by giving the service 2 AZs and
-      letting Fargate's scheduler pick an ARM64-capable one (see note below).
+      CPU architecture of the container instance. Must match both InstanceType
+      (Graviton = ARM64, e.g. t4g.*; Intel/AMD = X86_64, e.g. t3.*) AND the
+      EcsAmiId SSM parameter (arm64 vs x86_64 ECS-optimized AMI). The default
+      (ARM64 + t4g.large + the arm64 AMI) is ~20% cheaper and is the supported
+      path. The setup skill probes one ARM64-capable AZ and passes it as AZ1.
+
+  InstanceType:
+    Type: String
+    Default: t4g.large
+    Description: >
+      EC2 instance type for the single container instance. Must be large enough
+      to host the task (TaskCpu/TaskMemory) after the ECS agent + OS
+      reservation, AND match CpuArchitecture (t4g.* = ARM64, t3.* = X86_64).
+      Default t4g.large (2 vCPU / 8 GiB) comfortably hosts a 1024/4096 task
+      with host headroom. t4g.medium (4 GiB) is too small for a 4096-MiB task.
+
+  EcsAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended/image_id
+    Description: >
+      SSM parameter that resolves to the latest Amazon Linux 2023
+      ECS-optimized AMI for the task's architecture. Default is the arm64 AMI
+      (matches CpuArchitecture=ARM64 + InstanceType=t4g.*); for X86_64 switch
+      to .../amazon-linux-2023/x86_64/recommended/image_id. Resolving from SSM
+      means every deploy gets the latest patched AMI with no hardcoded ID.
 
   TaskCpu:
     Type: String
-    Default: "2048"
+    Default: "1024"
     AllowedValues: ["256", "512", "1024", "2048", "4096"]
-    Description: Task CPU in CPU units. 2048 = 2 vCPU.
+    Description: >
+      Task CPU in CPU units. 1024 = 1 vCPU. Reserves a full vCPU for the host
+      (ECS agent + OS) on a t4g.large (2 vCPU); the claw is inference-via-API,
 
   TaskMemory:
     Type: String
     Default: "4096"
-    AllowedValues: ["512", "1024", "2048", "3072", "4096", "6144", "8192", "16384"]
-    Description: Task memory in MiB. 4096 = 4 GiB.
+    AllowedValues: ["512", "1024", "2048", "3072", "4096", "6144", "8192"]
+    Description: >
+      Task memory in MiB. 4096 = 4 GiB. Must fit within the instance's
+      registered capacity minus the host reservation.
 
   TimeZone:
     Type: String
@@ -65,17 +93,10 @@ Parameters:
     Type: String
     Default: us-east-1a
     Description: >
-      First availability zone for the claw's subnets. The setup skill probes
-      ARM64 (Graviton) capability per-AZ via describe-instance-type-offerings
-      and passes the best two here; the default falls back to the first
-      account-available AZ. Fargate only places the ARM64 task in an AZ that
-      supports the requested cpuArchitecture.
-
-  AZ2:
-    Type: String
-    Default: us-east-1b
-    Description: Second AZ (see AZ1). Used so Fargate has a fallback if AZ1
-      lacks ARM64 capacity at placement time.
+      Single availability zone for the claw. EBS is zonal, so the volume, the
+      container instance, and the task all live in AZ1 — correct block storage
+      is worth the loss of a multi-AZ placement hedge. The setup skill probes one ARM64-capable AZ via
+      describe-instance-type-offerings and passes it here.
 
   EnableOpenRouterKey:
     Type: String
@@ -142,19 +163,14 @@ Conditions:
   GitHubKeyEnabled: !Equals [!Ref EnableGitHubKey, "true"]
 
 # ── Resources ───────────────────────────────────────────────────────────────
-#
-# ARM64 Fargate is not available in every AZ of every account (e.g. some
-# accounts lack it in us-east-1e/1f) and there is no API to probe per-AZ
-# ARM64 support. This template handles it by creating subnets in the first two
-# account-available AZs (Fn::GetAZs) and giving the ECS service both —
-# Fargate's scheduler only places the task in an AZ that supports the
-# requested cpuArchitecture. The setup skill reports which AZ landed.
 
 Resources:
 
-  # ── Networking: dedicated VPC, 2 public subnets across 2 AZs ──────────────
+  # ── Networking: dedicated VPC, 1 public subnet in a single AZ ─────────────
   # Own VPC (not the default) so teardown is clean and the claw is isolated.
-  # 2 AZs so Fargate can pick an ARM64-capable one for placement.
+  # Single AZ: EBS is zonal, so the data volume, instance, and task all live in
+  # AZ1. MapPublicIpOnLaunch gives the instance (and thus the host-mode task) a
+  # public IP for outbound — there is no NAT gateway.
 
   VPC:
     Type: AWS::EC2::VPC
@@ -184,15 +200,6 @@ Resources:
       MapPublicIpOnLaunch: true
       Tags: [{ Key: Name, Value: !Sub "${ClawName}-subnet-a" }]
 
-  PublicSubnetB:
-    Type: AWS::EC2::Subnet
-    Properties:
-      VpcId: !Ref VPC
-      CidrBlock: 10.0.16.0/20
-      AvailabilityZone: !Ref AZ2
-      MapPublicIpOnLaunch: true
-      Tags: [{ Key: Name, Value: !Sub "${ClawName}-subnet-b" }]
-
   PublicRouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
@@ -213,104 +220,41 @@ Resources:
       SubnetId: !Ref PublicSubnetA
       RouteTableId: !Ref PublicRouteTable
 
-  SubnetBRouteTableAssociation:
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties:
-      SubnetId: !Ref PublicSubnetB
-      RouteTableId: !Ref PublicRouteTable
-
-  # ── Security group: self-referenced NFS (2049) for EFS, nothing else inbound─
-  # Outbound is fully open (default) — the bot polls Slack via socket mode.
+  # ── Security group: inbound-less, outbound open ───────────────────────────
+  # The bot polls Slack via socket mode (outbound). With host networking the
+  # task shares this ENI, so the SG governs all container traffic. No ingress
+  # (the bot is outbound-only).
 
   SecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupName: !Ref ClawName
-      GroupDescription: !Sub "ECS + EFS for ${ClawName}"
+      GroupDescription: !Sub "ECS host for ${ClawName}"
       VpcId: !Ref VPC
       Tags: [{ Key: Name, Value: !Sub "${ClawName}-sg" }]
 
-  SecurityGroupSelfIngress:
-    Type: AWS::EC2::SecurityGroupIngress
-    Properties:
-      GroupId: !Ref SecurityGroup
-      IpProtocol: tcp
-      FromPort: 2049
-      ToPort: 2049
-      SourceSecurityGroupId: !Ref SecurityGroup
+  # ── Persistent EBS data volume (standalone, retained, zonal) ──────────────
+  # The SQLite backing store. Standalone (not in the launch template) so it
+  # survives ASG instance replacement; the UserData finds it by tag and
+  # attaches it on every boot. Retained on stack delete —
+  # teardown deletes it explicitly after confirmation. Identified two ways:
+  #   - AWS API: tag Name=${ClawName}-data (for the UserData describe+attach)
+  #   - filesystem: LABEL=clawdata (for mount — a fixed label avoids the ext4
+  #     16-byte limit that a ${ClawName}-derived label would blow past).
+  # The shared ClawName tag scopes the instance profile's ec2:AttachVolume.
 
-  # ── EFS: persistent claw state. 4 access points, uid/gid 1000 (harness user)─
-
-  EFSFileSystem:
-    Type: AWS::EFS::FileSystem
-    # Retain data across stack deletion — protects sessions/memories/skills.
-    # The teardown skill deletes this explicitly after user confirmation.
+  EbsDataVolume:
+    Type: AWS::EC2::Volume
     UpdateReplacePolicy: Retain
     DeletionPolicy: Retain
     Properties:
-      PerformanceMode: generalPurpose
-      ThroughputMode: bursting
+      AvailabilityZone: !Ref AZ1
+      Size: 30
+      VolumeType: gp3
       Encrypted: true
-      FileSystemTags: [{ Key: Name, Value: !Sub "${ClawName}-data" }]
-
-  # One access point per persisted path — mirrors the harness CLI bind-mounts
-  # so hermes config/sessions, XDG config, and mise tools & trust all survive
-  # task restarts. EFS access points are why we DON'T need bclaw's fly
-  # single-volume Dockerfile/entrypoint here — EFS gives 4 native mounts.
-  HermesAccessPoint:
-    Type: AWS::EFS::AccessPoint
-    Properties:
-      FileSystemId: !Ref EFSFileSystem
-      PosixUser: { Uid: "1000", Gid: "1000" }
-      RootDirectory:
-        Path: /hermes
-        CreationInfo: { OwnerUid: "1000", OwnerGid: "1000", Permissions: "0755" }
-      AccessPointTags: [{ Key: Name, Value: !Sub "${ClawName}-data" }]
-
-  ConfigAccessPoint:
-    Type: AWS::EFS::AccessPoint
-    Properties:
-      FileSystemId: !Ref EFSFileSystem
-      PosixUser: { Uid: "1000", Gid: "1000" }
-      RootDirectory:
-        Path: /xdg-config
-        CreationInfo: { OwnerUid: "1000", OwnerGid: "1000", Permissions: "0755" }
-      AccessPointTags: [{ Key: Name, Value: !Sub "${ClawName}-data" }]
-
-  MiseDataAccessPoint:
-    Type: AWS::EFS::AccessPoint
-    Properties:
-      FileSystemId: !Ref EFSFileSystem
-      PosixUser: { Uid: "1000", Gid: "1000" }
-      RootDirectory:
-        Path: /mise-data
-        CreationInfo: { OwnerUid: "1000", OwnerGid: "1000", Permissions: "0755" }
-      AccessPointTags: [{ Key: Name, Value: !Sub "${ClawName}-data" }]
-
-  MiseStateAccessPoint:
-    Type: AWS::EFS::AccessPoint
-    Properties:
-      FileSystemId: !Ref EFSFileSystem
-      PosixUser: { Uid: "1000", Gid: "1000" }
-      RootDirectory:
-        Path: /mise-state
-        CreationInfo: { OwnerUid: "1000", OwnerGid: "1000", Permissions: "0755" }
-      AccessPointTags: [{ Key: Name, Value: !Sub "${ClawName}-data" }]
-
-  # Mount targets in both subnets — a task can land in either AZ.
-  EFSMountTargetA:
-    Type: AWS::EFS::MountTarget
-    Properties:
-      FileSystemId: !Ref EFSFileSystem
-      SubnetId: !Ref PublicSubnetA
-      SecurityGroups: [!Ref SecurityGroup]
-
-  EFSMountTargetB:
-    Type: AWS::EFS::MountTarget
-    Properties:
-      FileSystemId: !Ref EFSFileSystem
-      SubnetId: !Ref PublicSubnetB
-      SecurityGroups: [!Ref SecurityGroup]
+      Tags:
+        - { Key: Name, Value: !Sub "${ClawName}-data" }
+        - { Key: ClawName, Value: !Ref ClawName }
 
   # ── KMS: customer-managed key for SSM SecureString encryption ─────────────
   # A dedicated CMK (not the default alias/aws/ssm) so the deployer IAM policy
@@ -318,7 +262,7 @@ Resources:
   # deterministic alias (alias/${ClawName}-ssm). SSM params are encrypted with
   # this key (Phase 3 selects it as the KMS Key ID when creating each
   # SecureString in the console).
-  # Retained on stack delete (like EFS); teardown skill schedules deletion.
+  # Retained on stack delete (like the EBS volume); teardown skill schedules deletion.
 
   SsmKmsKey:
     Type: AWS::KMS::Key
@@ -355,9 +299,7 @@ Resources:
   # scoped to the claw's parameter prefix. DesiredCount is a parameter
   # (default 1): on a FIRST deploy the skill passes DesiredCount=0 so the task
   # doesn't start before the SSM parameters exist (it would crash-loop on the
-  # missing env vars), then scales to 1. The default is 1, not 0, deliberately
-  # — a stack update that forgets to re-pass it keeps the claw running instead
-  # of silently scaling it to 0.
+  # missing env vars), then scales to 1.
   #
   # The claw is a Slack socket-mode bot (see README + slack-manifest.json).
   # Always-required parameters (unconditional in secrets[]):
@@ -440,6 +382,53 @@ Resources:
                   - ssmmessages:OpenDataChannel
                 Resource: "*"
 
+  # ── IAM: container-instance role + instance profile ───────────────────────
+  # The EC2 container instance (ASG-managed) needs:
+  #   - AmazonEC2ContainerServiceforEC2Role — register with ECS + report status
+  #   - AmazonSSMManagedInstanceCore        — SSM agent (ECS Exec + host Session Manager)
+  #   - inline attach-data-volume           — let the UserData find + attach the
+  #     claw's own EBS volume. DescribeVolumes is a list call (Resource:*); the
+  #     AttachVolume is scoped by the shared ClawName tag, which both the volume
+  #     and the instance carry (the AttachVolume request names both resources,
+  #     so a per-resource Name condition can't match both — hence the shared key).
+
+  ContainerInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ClawName}-instance"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: attach-data-volume
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: DescribeVolumes
+                Effect: Allow
+                Action: ec2:DescribeVolumes
+                Resource: "*"
+              - Sid: AttachDataVolume
+                Effect: Allow
+                Action: ec2:AttachVolume
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    "aws:ResourceTag/ClawName": !Ref ClawName
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub "${ClawName}-instance-profile"
+      Roles:
+        - !Ref ContainerInstanceRole
+
   # ── Logs ──────────────────────────────────────────────────────────────────
 
   LogGroup:
@@ -458,15 +447,203 @@ Resources:
         ExecuteCommandConfiguration:
           Logging: DEFAULT
 
-  # ── Task definition ───────────────────────────────────────────────────────
+  # ── Launch template for the container instance ────────────────────────────
+  # host networking means the task shares this ENI, so the SG lives here (not
+  # on a task ENI). AssociatePublicIpAddress gives the instance — and thus the
+  # task — a public IP for outbound (no NAT gateway). The UserData does ALL of
+  # the persistent-volume wiring (find/attach/format/mount the EBS volume) BEFORE
+  # writing ECS_CLUSTER and restarting the ECS agent, so the agent never
+  # registers — and ECS never places the task — before /data is mounted.
+
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub "${ClawName}-lt"
+      # Note: AWS::EC2::LaunchTemplate has no top-level Tags property, and
+      # tagging the template itself via CFN (TagSpecifications ResourceType:
+      # launch-template) is flaky on update (aws-cloudformation/cloudformation-
+      # coverage-roadmap#957). So the launch template is NOT tag-scoped in the
+      # deployer policy — ec2 launch-template CRUD uses Resource:"*" (LTs are
+      # account-scoped, low-risk). The instance + root volumes the template
+      # LAUNCHES are tagged via TagSpecifications below, and the standalone
+      # EbsDataVolume + ASG ARE tag-scoped.
+      LaunchTemplateData:
+        ImageId: !Ref EcsAmiId
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile:
+          Arn: !GetAtt InstanceProfile.Arn
+        MetadataOptions:
+          HttpTokens: required
+          HttpPutResponseHopLimit: 2
+        NetworkInterfaces:
+          - AssociatePublicIpAddress: true
+            DeviceIndex: 0
+            Groups:
+              - !Ref SecurityGroup
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - { Key: Name, Value: !Sub "${ClawName}-instance" }
+              - { Key: ClawName, Value: !Ref ClawName }
+          - ResourceType: volume
+            Tags:
+              - { Key: Name, Value: !Sub "${ClawName}-root" }
+              - { Key: ClawName, Value: !Ref ClawName }
+        UserData:
+          # Fn::Sub runs at template-processing time. To stay robust inside a
+          # LaunchTemplate (where the ${!Literal} escape mis-resolves), the
+          # ONLY ${...} sequences below are REAL CloudFormation substitutions
+          # (${ClawName}, ${AWS::Region}); every bash variable uses brace-free
+          # $VAR syntax, which Fn::Sub passes through untouched ($ not followed
+          # by {). No $$ and no ${!} appear anywhere.
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -euo pipefail
+            exec > >(tee -a /var/log/user-data.log) 2>&1
+            echo "=== ${ClawName} container-instance UserData start ==="
+
+            CLAW='${ClawName}'
+            REGION='${AWS::Region}'
+            # The data volume ID is baked in at deploy time by CloudFormation
+            # (Fn::Sub resolves ${EbsDataVolume} to the !Ref of the stack's
+            # standalone retained AWS::EC2::Volume). This is STABLE long-term —
+            # the volume is DeletionPolicy:Retain, so it survives stack churn,
+            # and a stack update that replaced it would regenerate this launch
+            # template version with the new ID anyway. Baking the exact ID (not
+            # a tag lookup) means leftover orphan volumes from prior failed
+            # deploys can't shadow the stack's current volume.
+            VOL_ID='${EbsDataVolume}'
+            LABEL=clawdata
+            MOUNT=/data
+
+            # --- ensure the AWS CLI is present (AL2023 ECS-optimized AMI may
+            #     or may not ship it; install if missing) ---
+            command -v aws >/dev/null 2>&1 || dnf install -y awscli || dnf install -y aws-cli
+
+            # --- IMDSv2 token helper (used for instance-id + AZ below) ---
+            t() { curl -sX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 30"; }
+            TOKEN=$(t)
+            SELF=$(curl -sH "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+            echo "self=$SELF region=$REGION volume=$VOL_ID"
+
+            # --- attach the claw's data volume to this instance (retry: a
+            #     predecessor instance being replaced by the ASG may still be
+            #     detaching it → VolumeInUse) ---
+            for i in $(seq 1 30); do
+              if aws ec2 attach-volume --region "$REGION" --instance-id "$SELF" \
+                   --volume-id "$VOL_ID" --device /dev/sdf 2>/dev/null; then
+                echo "attach issued"; break
+              fi
+              echo "attach attempt $i/30 failed (likely VolumeInUse during predecessor detach) — retrying in 5s"
+              sleep 5
+            done
+            aws ec2 wait volume-in-use --region "$REGION" --volume-ids "$VOL_ID" || true
+
+            # --- discover the attached block device. Prefer matching the EBS
+            #     volume ID via ebsnvme-id (unambiguous); fall back to the
+            #     non-root nvme disk. (On Graviton/Nitro the attach device hint
+            #     /dev/sdf surfaces as /dev/nvme1n1 — never trust the hint name;
+            #     we mount by LABEL below regardless.) ---
+            DATA_DEV=""
+            # POLL up to 60s: aws ec2 wait volume-in-use fires on the AWS-side
+            # state, but the local /dev/nvme*n1 node is often not enumerated
+            # yet — a single scan races and aborts under set -e (which fails
+            # cloud-final, and ecs.service is After=cloud-final, so ECS never
+            # starts). ebsnvme-id -v prints "Volume ID: <id>" — strip the prefix.
+            for i in $(seq 1 30); do
+              for d in /dev/nvme*n1; do
+                [ -b "$d" ] || continue
+                if command -v ebsnvme-id >/dev/null 2>&1; then
+                  vid=$(ebsnvme-id -v "$d" 2>/dev/null | sed 's/^Volume ID:[[:space:]]*//' | tr -d '[:space:]')
+                  if [ "$vid" = "$VOL_ID" ]; then DATA_DEV="$d"; break 2; fi
+                fi
+              done
+              [ -n "$DATA_DEV" ] && break
+              sleep 2
+            done
+            if [ -z "$DATA_DEV" ]; then
+              ROOT_SRC=$(findmnt -nfo SOURCE /)
+              ROOT_DISK=$(lsblk -nfo PKNAME "$ROOT_SRC" 2>/dev/null | head -1)
+              [ -z "$ROOT_DISK" ] && ROOT_DISK=nvme0n1
+              for d in /dev/nvme*n1; do
+                [ -b "$d" ] || continue
+                [ "$(basename "$d")" = "$ROOT_DISK" ] && continue
+                DATA_DEV="$d"; break
+              done
+            fi
+            [ -n "$DATA_DEV" ] || { echo "FATAL: could not locate the attached data block device"; exit 1; }
+            echo "data device: $DATA_DEV"
+
+            # --- format if fresh (no filesystem yet), then mount by label ---
+            if ! blkid "$DATA_DEV" >/dev/null 2>&1; then
+              echo "fresh volume — formatting $DATA_DEV as ext4 label=$LABEL"
+              mkfs.ext4 -L "$LABEL" "$DATA_DEV"
+            fi
+            mkdir -p "$MOUNT"
+            mount "LABEL=$LABEL" "$MOUNT"
+            grep -q "LABEL=$LABEL" /etc/fstab || echo "LABEL=$LABEL $MOUNT ext4 defaults,nofail 0 2" >> /etc/fstab
+
+            # --- the 4 persisted subdirs, owned by the harness user (uid/gid 1000) ---
+            mkdir -p "$MOUNT/hermes" "$MOUNT/xdg-config" "$MOUNT/mise-data" "$MOUNT/mise-state"
+            chown -R 1000:1000 "$MOUNT"
+
+            # --- register with ECS LAST: with ECS_CLUSTER absent the agent will
+            #     not register to any cluster, so the first real registration is
+            #     guaranteed post-mount (no task can bind-mount an unmounted
+            #     /data and silently land on the ephemeral root fs).
+            #
+            #     DO NOT `systemctl restart ecs` from here: ecs.service is ordered
+            #     After=cloud-final, and UserData runs INSIDE cloud-final, so a
+            #     restart deadlocks (restart waits for cloud-final to finish,
+            #     cloud-final waits for UserData to return, UserData waits for the
+            #     restart). Just write ECS_CLUSTER and exit — systemd starts
+            #     ecs.service on its own once cloud-final completes, and the agent
+            #     reads ecs.config at that start. ---
+            grep -q "^ECS_CLUSTER=" /etc/ecs/ecs.config 2>/dev/null || echo "ECS_CLUSTER=${ClawName}" >> /etc/ecs/ecs.config
+            echo "=== ${ClawName} UserData done ==="
+
+  # ── Auto Scaling Group: exactly one container instance, self-healing ──────
+  # min=max=desired=1: if the instance fails a status check or is retired by
+  # AWS, the ASG launches a replacement whose UserData reattaches the SAME
+  # retained volume → data survives. This covers AWS-initiated retirement
+  # (which a standalone instance + RecoverInstance alarm does not), which is
+  # why ASG was chosen over a standalone instance. No CloudWatch recovery
+  # alarm is needed — the ASG + EC2 health checks are the recovery.
+  # DependsOn EbsDataVolume so the volume exists before the first instance
+  # tries to attach it.
+
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn: EbsDataVolume
+    Properties:
+      AutoScalingGroupName: !Sub "${ClawName}-asg"
+      VPCZoneIdentifier:
+        - !Ref PublicSubnetA
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      MinSize: "1"
+      MaxSize: "1"
+      DesiredCapacity: "1"
+      Tags:
+        - { Key: Name, Value: !Sub "${ClawName}-instance", PropagateAtLaunch: true }
+        - { Key: ClawName, Value: !Ref ClawName, PropagateAtLaunch: true }
+
+  # ── Task definition (host networking, host bind-mount volumes) ────────────
 
   TaskDefinition:
     Type: AWS::ECS::TaskDefinition
-    DependsOn: [EFSMountTargetA, EFSMountTargetB]
     Properties:
       Family: !Ref ClawName
-      NetworkMode: awsvpc
-      RequiresCompatibilities: [FARGATE]
+      # host networking: the container shares the instance's ENI (which has a
+      # public IP via the launch template), giving it outbound to Slack/ghcr/SSM
+      # with no NAT gateway. On the EC2 launch type, awsvpc task ENIs get no
+      # public IP and have no internet without a NAT gateway (AssignPublicIp is
+      # Fargate-only) — host networking avoids that. SG-per-task is meaningless
+      # at 1 task : 1 instance, so the single inbound-less SG on the instance
+      # ENI is equivalent.
+      NetworkMode: host
+      RequiresCompatibilities: [EC2]
       Cpu: !Ref TaskCpu
       Memory: !Ref TaskMemory
       RuntimePlatform:
@@ -509,8 +686,8 @@ Resources:
           # collision entirely, so gh reads the token from stdin and stores it.
           # Storing is NECESSARY, not optional: the harness
           # terminal/execute_code sandbox scrubs token-like env vars from its
-          # environment, so `gh`/git calls the agent makes find no env var —
-          # they rely on the stored credential in hosts.yml (on EFS, persists
+          # environment, so `gh`/git calls the agent makes find no env var—
+          # they rely on the stored credential in hosts.yml (on EBS, persists
           # across restarts).
           Command:
             - sh
@@ -555,28 +732,21 @@ Resources:
               awslogs-region: !Ref AWS::Region
               awslogs-stream-prefix: hermes
       Volumes:
+        # The 4 bind-mount paths mirror the harness CLI bind-mounts; the
+        # UserData wires up the /data subdirs that back them.
         - Name: hermes-data
-          EFSVolumeConfiguration:
-            FileSystemId: !Ref EFSFileSystem
-            TransitEncryption: ENABLED
-            AuthorizationConfig: { AccessPointId: !Ref HermesAccessPoint, IAM: DISABLED }
+          Host: { SourcePath: /data/hermes }
         - Name: hermes-config
-          EFSVolumeConfiguration:
-            FileSystemId: !Ref EFSFileSystem
-            TransitEncryption: ENABLED
-            AuthorizationConfig: { AccessPointId: !Ref ConfigAccessPoint, IAM: DISABLED }
+          Host: { SourcePath: /data/xdg-config }
         - Name: hermes-mise-data
-          EFSVolumeConfiguration:
-            FileSystemId: !Ref EFSFileSystem
-            TransitEncryption: ENABLED
-            AuthorizationConfig: { AccessPointId: !Ref MiseDataAccessPoint, IAM: DISABLED }
+          Host: { SourcePath: /data/mise-data }
         - Name: hermes-mise-state
-          EFSVolumeConfiguration:
-            FileSystemId: !Ref EFSFileSystem
-            TransitEncryption: ENABLED
-            AuthorizationConfig: { AccessPointId: !Ref MiseStateAccessPoint, IAM: DISABLED }
+          Host: { SourcePath: /data/mise-state }
 
   # ── Service: DesiredCount is a !Ref (default 1); first deploy passes 0 ──────
+  # No NetworkConfiguration: host-mode tasks share the instance's ENI, so there
+  # is no task subnet/SG to specify (the SG is on the instance via the launch
+  # template).
 
   Service:
     Type: AWS::ECS::Service
@@ -585,15 +755,31 @@ Resources:
       Cluster: !Ref Cluster
       TaskDefinition: !Ref TaskDefinition
       DesiredCount: !Ref DesiredCount
-      LaunchType: FARGATE
+      LaunchType: EC2
       EnableExecuteCommand: true
-      NetworkConfiguration:
-        AwsvpcConfiguration:
-          Subnets:
-            - !Ref PublicSubnetA
-            - !Ref PublicSubnetB
-          SecurityGroups: [!Ref SecurityGroup]
-          AssignPublicIp: ENABLED
+      # The claw is single-replica (DesiredCount 1) and binds the Slack
+      # socket-mode connection — two tasks can NEVER coexist (they'd fight over
+      # the socket). The default ECS rolling strategy (MinimumHealthyPercent 100
+      # = start-new-before-stop-old) is impossible here: there is no room
+      # (memory or semantics) for a second task, and a force-new-deployment /
+      # image upgrade would stall on "insufficient memory / unable to place a
+      # task". MinimumHealthyPercent 0 permits a RECREATE: when ECS can't place
+      # the new task alongside the old one (it never can here), it stops the old
+      # task first (min 0 allows 0 running), then places the new one. ~10-20s
+      # bot-downtime swap (acceptable for a single-replica Slack bot); EBS state
+      # (sessions/memories/SQLite DBs) survives untouched. NOTE: ECS requires
+      # MaximumPercent > 100 (an Availability-Zone-Rebalancing constraint), so
+      # MaximumPercent stays at the default 200 — min 0 is what actually enables
+      # the recreate-on-capacity-constraint.
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 0
+        MaximumPercent: 200
+        # Fail fast if the new task keeps crash-looping instead of silently
+        # rolling back forever. The default is enabled+rollback, but pin it
+        # explicitly so a bad image/secret surfaces as a failed deploy.
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
 
 # ── Outputs ─────────────────────────────────────────────────────────────────
 
@@ -606,12 +792,16 @@ Outputs:
     Value: !Ref Service
   TaskDefinitionArn:
     Value: !Ref TaskDefinition
-  EFSFileSystemId:
-    Value: !Ref EFSFileSystem
+  EbsVolumeId:
+    Value: !Ref EbsDataVolume
+    Description: >
+      The retained gp3 data volume holding the 4 persisted subdirs (/data/*).
+      Survives stack delete (DeletionPolicy: Retain) and ASG instance
+      replacement; the teardown skill deletes it explicitly after confirmation.
+  AutoScalingGroupName:
+    Value: !Ref AutoScalingGroup
   SubnetA:
     Value: !Ref PublicSubnetA
-  SubnetB:
-    Value: !Ref PublicSubnetB
   VpcId:
     Value: !Ref VPC
   SecurityGroupId:
@@ -636,7 +826,7 @@ Outputs:
     Description: >
       Customer-managed KMS key for SSM SecureString encryption. The deployer
       policy pins kms:Decrypt to this key via kms:ResourceAliases on
-      alias/${ClawName}-ssm. Pass --key-id alias/${ClawName}-ssm to
+      alias/<ClawName>-ssm. Pass --key-id alias/<ClawName>-ssm to
       ssm put-parameter in Phase 3.
   KmsKeyAlias:
     Value: !Sub "alias/${ClawName}-ssm"
