@@ -55,6 +55,66 @@ steps and current-state facts only.
   shared procedure), but it must never depend on author-only docs, scripts, or
   state that won't be present in the generated repo.
 
+## Layout: Generator Repo + Integration Repo
+
+Since it doesn't make sense to deploy changes made in /workspace (its just templates + generator), we use an integration 
+repository instead (`/alt/integration`), which has AWS creds and represents a live, deployed bclaw we can make changes to.
+
+- `/workspace` (no aws access): the `create-bclaw` project, it creates project skeletons from `template/`
+- `/alt/integration` (aws access via direnv): a project created from `create-bclaw`; we edit and iterate on THIS repo, and 
+integrate ("port back") changes back into `/workspace/template/` once we verify they work.
+
+### Workflow conventions
+
+- **RFCs live in `/workspace/rfcs/`** (the generator project), never in the
+  iteration repo. They describe changes to the template that ships in the npm
+  package.
+- **Prototype edits happen in `/alt/integration`** so they can be confirmed
+  live against a real working test project before being ported back.
+
+### Integration cycles
+
+Working through a change to bclaw templates (skills, policies, CFN, etc), such as implementing a proposed RFC, goes through what
+is known as an "Integration Cycle". We always start a cycle by creating an integration journal and applying/testing our changes into `/alt/integration`.
+
+Once I (and only I) confirm the changes work in the `/alt/integration` project (this requires a deploy or a possible regeneration), we can integrate our changes back into
+the `create-bclaw` templates under `/workspace` and run the golden test. We can use the integration cycle journal to help us integrate our changes.
+
+#### Port-back: diff `/alt/integration` against `template/`
+
+The golden test only verifies that `/workspace/template/` reproduces byte-for-byte
+into a freshly-generated cluster — it does **not** verify that every edit made
+in `/alt/integration` was actually carried back. A file changed live but missed
+in the port-back is silently invisible to the golden test, because the check is
+`template/`↔generated, not `template/`↔`/alt/integration`.
+
+Before finishing a port-back, run a recursive diff of the two trees and
+**reconcile every deviation**:
+
+```bash
+diff -rq /workspace/template /alt/integration --exclude=.git --exclude=.agents/skills --exclude=node_modules --exclude=dist
+```
+
+- Any other deviation is a **missed port-back item**. Either fix it (carry the
+  edit into `template/`) or **flag it to the user** with the specific file +
+  the nature of the divergence before considering the port-back complete.
+
+`/workspace/AGENTS.md` itself, `/workspace/rfcs/`, and `/workspace/references/`
+are generator-repo-only (no `template/` equivalent) — those are not divergences.
+The `/workspace/` root files (`package.json`, `src/`, etc.) likewise. The check
+is scoped to what a generated cluster inherits from `template/`.
+
+#### Integration cycle journal Format
+
+To aid in porting back changes, keep a journal of issues we encountered during an integration cycle in `/workspace/references/integrations/YYYY-MM-DD_short_title.md` in journal-style append-only format.
+
+- `# Title` — short descriptive title
+- `**Date:**` — ate (ISO format)
+- `**Status:**` — `In Progress`, `Done`
+- `## Entries` — List of entries
+
+ONLY add issues, do not talk about plans or implementation details (the rfc is for that, just link to it)
+
 ## Tool Versions
 
 This project uses `mise.toml` as the single source of truth for all tool and
