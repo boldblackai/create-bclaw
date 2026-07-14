@@ -637,11 +637,8 @@ Resources:
       Family: !Ref ClawName
       # host networking: the container shares the instance's ENI (which has a
       # public IP via the launch template), giving it outbound to Slack/ghcr/SSM
-      # with no NAT gateway. On the EC2 launch type, awsvpc task ENIs get no
-      # public IP and have no internet without a NAT gateway (AssignPublicIp is
-      # Fargate-only) — host networking avoids that. SG-per-task is meaningless
-      # at 1 task : 1 instance, so the single inbound-less SG on the instance
-      # ENI is equivalent.
+      # with no NAT gateway. SG-per-task is meaningless at 1 task : 1 instance,
+      # so the single inbound-less SG on the instance ENI is equivalent.
       NetworkMode: host
       RequiresCompatibilities: [EC2]
       Cpu: !Ref TaskCpu
