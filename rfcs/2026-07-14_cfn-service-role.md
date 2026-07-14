@@ -1,7 +1,7 @@
 # CloudFormation service role to isolate the deployer identity
 
 **Date:** 2026-07-14
-**Status:** Proposed
+**Status:** Implemented
 
 ## Goal
 
@@ -258,15 +258,149 @@ the same change.
   the operator to first run Phase 0 to create `bclaw-cfn-exec`, then re-deploy
   with `--role-arn`. Document this in the setup skill's update path.
 
-## Implementation Checklist
+## Implementation Notes
 
-- [ ] **Integration cycle** in `/alt/integration`:
-  - [ ] Draft the `bclaw-cfn-exec` trust + inline execution policy (EC2/ASG/ECS/IAM/KMS/logs/PassRole lifecycle).
-  - [ ] Slim `otacon-deploy-policy.json` per the split table; remove direct `bclaw-*` IAM, unscoped `CreateTags`, `PutKeyPolicy`, deployer log-write, `RegisterTaskDefinition`.
-  - [ ] Add setup Phase 0 (idempotent role + inline policy); add `--role-arn` to the deploy.
-  - [ ] Add teardown step (delete inline policy, then role).
-  - [ ] Verify both C1 chains are denied (policy simulator); verify operator workflows intact.
-- [ ] Port back to `template/`: `bclaw-deploy-policy.json`, setup-bclaw Phase 0 + Phase 2 `--role-arn`, teardown-bclaw role-deletion step.
-- [ ] Update `template/README.md` permissions section to describe the service-role split.
-- [ ] Run `pnpm lint` and the golden test; reconcile the diff.
-- [ ] Note orthogonal follow-ups (L1 KMS teardown cleanup, L2 `ssm:StartSession`) for separate RFCs.
+Implemented via integration cycle on the `otacon` stack (deployer user
+`otacon-deployer`, account `660493448574`, region `us-east-1`), then ported
+back to `template/`. Integration journal was discarded after port-back per the
+repo workflow.
+
+### C1 closed (both chains denied on the slimmed deployer policy)
+
+The deployer key no longer holds `iam:CreateRole`/`PutRolePolicy`/`PassRole` on
+any `otacon-*` wildcard — `CreateRole`/`PutRolePolicy` are pinned to the literal
+`role/otacon-cfn-exec`, and the only `PassRole` is `otacon-cfn-exec` →
+`cloudformation.amazonaws.com`. Live-tested (the deployer identity cannot run
+the IAM simulator — `iam:SimulateCustomPolicy` is intentionally omitted — so
+verification was live denial/allow against the real evaluated policy):
+
+- **Chain A (EC2/ASG)** — `iam:CreateRole role/otacon-evil`,
+  `iam:PutRolePolicy` on `otacon-task`/`otacon-exec`/`otacon-instance`,
+  `iam:CreateInstanceProfile`, `ec2:CreateLaunchTemplate`, `autoscaling:CreateAutoScalingGroup`:
+  all `UnauthorizedOperation`.
+- **Chain B (ECS)** — `ecs:RegisterTaskDefinition` (both an evil family and the
+  `otacon` family): `UnauthorizedOperation`. `iam:PassRole` to `ecs-tasks`/`ec2`
+  is structurally impossible — granted only for `cfn-exec`→`cloudformation`.
+- **Secondary findings** (`H1` unscoped `CreateTags`, `H2` `kms:CreateKey`/
+  `PutKeyPolicy`/`DescribeKey`/`CreateAlias`, `M2` `logs:PutLogEvents`/
+  `CreateLogGroup`, `M3` unscoped network create, `L3`
+  `RegisterTaskDefinition`, `L4` `sts:DecodeAuthorizationMessage`):
+  all `UnauthorizedOperation` on the slimmed deployer.
+
+### Operator workflows intact
+
+Verified live: stack deploy/delete with `--role-arn`; `ecs:UpdateService` (scale
++ force-redeploy, setup Phase 4 / teardown Phase 1 / manage Modes 1+4); ECS read
+(`DescribeServices`/`DescribeTasks`/`ListTasks`); `ecs:ExecuteCommand` (auth
+passes — the Session Manager plugin is a separate local install, not a policy
+concern); `manage-bclaw` Mode 4 (`GetConsoleOutput` + `TerminateInstances --dry-run`,
+`ClawName`-scoped); teardown Phase 3 retained-volume delete (`DeleteVolume` →
+`VolumeInUse` = auth passed); SSM secret write/read/delete + KMS decrypt via
+`ResourceAliases`.
+
+### Teardown role-deletion verified
+
+The new final step (delete the inline policy, then the role) is correct: IAM
+returns `DeleteConflict: Cannot delete entity, must delete policies first.` if
+the role is deleted with the inline policy attached — proven by recreating the
+role and attempting it both ways. The teardown skill runs Phase 6 (role delete)
+**after** the stack delete (the role is needed during `delete-stack`).
+
+### Verified by a full fresh CREATE + live bot
+
+The cycle's first verification passed an UPDATE-only probe (a no-change
+re-deploy that never exercises resource creation), which missed three cfn-exec
+permissions the full dependency graph needs on a fresh CREATE: the logs tag
+actions, the unconditional KMS key-management actions, and `ec2:RunInstances`.
+Each surfaced as a distinct `CREATE_FAILED` on a from-scratch redeploy and was
+fixed in `template/bclaw-cfn-exec-policy.json`. The final redeploy — fresh
+`CREATE` through `bclaw-cfn-exec`, secrets written, service scaled to 1 —
+resulted in a RUNNING task with a live Slack socket-mode connection. **A fresh
+CREATE is the only reliable proof that cfn-exec carries the full lifecycle;
+UPDATE-only probes are insufficient for a service-role port-back.**
+
+### What changed (port-back)
+
+- **`template/bclaw-deploy-policy.json`**: slimmed per the split table —
+  removes direct `bclaw-*` IAM (except the literal `role/bclaw-cfn-exec`),
+  unscoped `CreateTags`, `PutKeyPolicy`, deployer log-write
+  (`PutLogEvents`/`CreateLogStream`/`CreateLogGroup`),
+  `RegisterTaskDefinition`, `CreateKey`, `RunInstances` (already gone),
+  `sts:DecodeAuthorizationMessage`. Keeps operator workflows: stack management
+  (`+ GetTemplateSummary`/`ValidateTemplate` on `*`), tag-scoped deletes,
+  `EC2InstanceOps`, `ECSServiceManage` (the deployer scales/restarts the service
+  directly), `ECSExec`, `SSMMessages`, `LogsRead`, `SSMSecrets`, `KMSUseKey`,
+  `ManageCfnExecRole`, `PassRoleToCfn`. Size **5881/6144** (was 8801) — headroom
+  for future deployer-side grants.
+- **`template/bclaw-cfn-exec-trust.json` + `bclaw-cfn-exec-policy.json`**
+  (new): the service role's trust (`cloudformation.amazonaws.com` only) and
+  inline execution policy (the full infra-create lifecycle). Inline policy is
+  **6215** chars, under the ~10240-char inline-policy limit.
+- **`setup-bclaw` skill**: new **Phase 0** (idempotent `create-role`/`update-assume-role-policy`
+  + `put-role-policy`); Phase 2 deploy (and the 2-pre rollback cleanup) pass
+  `--role-arn`; prerequisites note the two-role model.
+- **`teardown-bclaw` skill**: Phase 2 `delete-stack` passes `--role-arn`; new
+  **Phase 6** (delete inline policy, then role); verification renumbered to
+  Phase 7 + adds a `cfn-exec role: gone` check.
+- **`manage-bclaw` skill**: Mode 3 image-upgrade deploy passes `--role-arn`.
+- **`template/README.md`**: section 2 rewritten for the two-role model (deployer
+  policy + service role), with the `Resource: "*"`, tag-conditioned, and ARN-pinned
+  tables updated to the slimmed statements.
+
+### Integration-cycle issues that shaped the port-back
+
+- **cfn-exec's `LogsLifecycle` must include the logs tag actions.** Applying a
+  tag to an `AWS::Logs::LogGroup` needs `logs:TagResource`/
+  `ListTagsForResource`/`UntagResource`, which the original tag-less LogGroup
+  never exercised; omitting them left the stack in `UPDATE_ROLLBACK_FAILED`.
+  The shipped `bclaw-cfn-exec-policy.json` carries all three.
+- **cfn-exec's KMS key-management actions cannot be alias-scoped.** Scoping
+  `kms:PutKeyPolicy`/`EnableKeyRotation`/`DescribeKey` to
+  `kms:ResourceAliases = alias/<claw>-ssm` blocks `CreateKey`: KMS evaluates
+  the caller's future ability to *administer* the key (i.e. `PutKeyPolicy`) at
+  `CreateKey` time, **before the alias exists**, so the alias condition cannot
+  match and `CreateKey` fails with *"The new key policy will not allow you to
+  update the key policy in the future."* This was missed by the cycle's
+  UPDATE-only probe (a no-change update never creates the key); it surfaced on
+  the first fresh `CREATE`. The shipped `bclaw-cfn-exec-policy.json` merges the
+  KMS statements into one unconditional `KMSLifecycle` statement. (The deployer
+  side is unaffected — it never had these actions; `KMSUseKey`'s
+  `ResourceAliases` scoping on Decrypt/Encrypt stands, since those run against
+  an existing aliased key.)
+- **cfn-exec's `iam:PassRole` is resource-scoped, not service-conditioned.**
+  `iam:PassedToService`-conditioning the service role's PassRole to
+  `ec2.amazonaws.com`/`ecs-tasks.amazonaws.com` breaks this stack's Auto Scaling
+  launch-template validation (the same constraint documented in the tag-scoped
+  RFC for the deployer side). The service role's PassRole is scoped to
+  `role/bclaw-*` + `instance-profile/bclaw-*` with no condition; the security
+  boundary is the resource scope (it can pass only the stack's own roles) plus
+  the trust policy (cfn-exec is assumable only by `cloudformation.amazonaws.com`).
+- **cfn-exec needs `ec2:RunInstances` (in `EC2LaunchTemplateManage`).** When a
+  CloudFormation `AWS::AutoScaling::AutoScalingGroup` references a launch
+  template that specifies an instance profile, the Auto Scaling handler
+  pre-validates the template by checking that the caller is authorized to
+  actually launch from it — and that check requires `ec2:RunInstances` (plus
+  `ec2:CreateTags`, since the template's `TagSpecifications` tag instances and
+  root volumes). Without it, `CreateAutoScalingGroup` fails with *"You are not
+  authorized to use launch template: lt-…"*. Real instance launches still go
+  through the Auto Scaling service-linked role; `RunInstances` on cfn-exec is
+  only what ASG's validation checks. (The pre-RFC deployer had `RunInstances`
+  unconditionally, which is why this only surfaced once the power moved to
+  cfn-exec.) `RunInstances` is on cfn-exec, never on the deployer.
+- **KMS auth-probe caveat.** KMS resolves a key **before** evaluating the
+  identity policy for key-targeted operations, so probing `DescribeKey`/
+  `PutKeyPolicy`/`CreateAlias` against a *nonexistent* key returns
+  `NotFoundException` (not a Deny) and is inconclusive. Verify KMS denies
+  against the **real** key ARN.
+- **`ec2:DetachVolume` is pre-existing-broken on the deployer** (the
+  `aws:ResourceTag/Name=otacon-data` condition matches only the volume side of
+  a two-resource `DetachVolume` call). Byte-identical in the pre-RFC broad
+  policy, so not a regression — flagged as an orthogonal follow-up (same
+category as L1/L2/L4/L5), not fixed here.
+
+### Orthogonal follow-ups (separate RFCs)
+
+`L1` (orphaned KMS key — add cleanup to teardown), `L2` (missing
+`ssm:StartSession` for the documented instance debug path), `L4`
+(`sts:DecodeAuthorizationMessage` on `*`), `L5` (account wildcard in ARNs), and
+the `DetachVolume` multi-resource tag mismatch noted above.

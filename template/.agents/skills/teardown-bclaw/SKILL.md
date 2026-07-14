@@ -3,9 +3,10 @@ name: teardown-bclaw
 description: >
   Tears down a Hermes Agent bclaw on ECS (EC2 launch type) and all associated
   AWS resources. Follows a reverse-order sequence: scale to 0 → delete
-  CloudFormation stack (VPC, EBS volume [retained], ASG, ECS, IAM) → delete SSM
-  secrets. Use when asked to destroy, teardown, or decommission the bclaw.
-  Companion to setup-bclaw.
+  CloudFormation stack (VPC, EBS volume [retained], ASG, ECS, IAM) → delete
+  retained EBS → delete orphaned VPC → delete SSM secrets → delete the
+  CloudFormation service role (`bclaw-cfn-exec`). Use when asked to destroy,
+  teardown, or decommission the bclaw. Companion to setup-bclaw.
 ---
 
 # Teardown Harness ECS on EC2
@@ -13,10 +14,14 @@ description: >
 Tears down a Hermes Agent claw on ECS (EC2 launch type). Follows the reverse
 order of setup so dependencies delete cleanly without orphans. The
 CloudFormation stack owns the VPC, the ASG + container instance, the ECS
-service/task/cluster, IAM roles (exec, task, container instance + instance
-profile), the log group, and the standalone EBS data volume. The EBS volume is
-retained by the stack's `DeletionPolicy: Retain` and must be deleted explicitly.
-SSM secrets are not stack-owned and are deleted separately.
+service/task/cluster, the stack's IAM roles (exec, task, container instance +
+instance profile), the log group, and the standalone EBS data volume. The EBS
+volume is retained by the stack's `DeletionPolicy: Retain` and must be deleted
+explicitly. SSM secrets are not stack-owned and are deleted separately. The
+CloudFormation service role (`bclaw-cfn-exec`) is also not stack-owned — it is
+created out-of-band in setup Phase 0 (the stack cannot create the role it
+assumes to create itself), so it survives `delete-stack` and is deleted here as
+the final step, after the stack is gone.
 
 ## Prerequisites
 
@@ -64,7 +69,7 @@ aws sts get-caller-identity --query 'Arn' --output text
 ```
 
 Teardown is self-correcting: a failed delete leaves the resource behind and
-Phase 6's verification catches any leftovers, so real permission gaps surface
+Phase 7's verification catches any leftovers, so real permission gaps surface
 as the phases run rather than up front.
 
 ---
@@ -125,9 +130,16 @@ container instance), security group, subnet, route table, internet gateway, and
 VPC. The standalone EBS volume is left behind (subject to the retain policy —
 see Phase 3).
 
+Delete the stack, passing `--role-arn bclaw-cfn-exec` so CloudFormation assumes
+the service role (the same role the deploys use) to perform the deletions. The
+service role is itself deleted in Phase 6, so it must be passed here while it
+still exists and is still needed:
+
 ```bash
 aws cloudformation delete-stack \
   --stack-name "$CLAW_NAME" \
+  --role-arn arn:aws:iam::$(aws sts get-caller-identity \
+    --query 'Account' --output text):role/${CLAW_NAME}-cfn-exec \
   --region "$AWS_REGION"
 ```
 
@@ -364,7 +376,35 @@ Expected: an empty list.
 
 ---
 
-### Phase 6: Final verification and report
+### Phase 6: Delete the CloudFormation service role
+
+**Gate: stack is `DELETE_COMPLETE` (Phase 2).**
+
+`bclaw-cfn-exec` is the role CloudFormation assumed during every deploy and the
+Phase 2 stack delete. It is not stack-owned, so `delete-stack` leaves it behind
+— it must be removed explicitly, and **last** (it was needed during the stack
+delete, and the deployer's only IAM-create powers now target this one literal
+role). The deployer policy's `ManageCfnExecRole` statement grants the deletes.
+
+**IAM refuses to delete a role that still has an inline policy attached**, so
+delete the inline execution policy *first*, then the role:
+
+```bash
+aws iam delete-role-policy \
+  --role-name "${CLAW_NAME}-cfn-exec" \
+  --policy-name "${CLAW_NAME}-cfn-exec"
+aws iam delete-role \
+  --role-name "${CLAW_NAME}-cfn-exec"
+```
+
+If `delete-role` fails with `DeleteConflict: Cannot delete entity, must delete
+policies first`, the inline policy was still attached — run the
+`delete-role-policy` line again, then retry `delete-role`. If the role is
+already gone, both calls return `NoSuchEntity`, which is fine.
+
+---
+
+### Phase 7: Final verification and report
 
 Confirm nothing is left under the claw's name:
 
@@ -386,12 +426,17 @@ aws ssm describe-parameters \
   --parameter-filters "Key=Name,Option=BeginsWith,Values=/bclaw/" \
   --region "$AWS_REGION" --query 'Parameters[].Name' --output text | grep -q . \
   && echo "ssm: STILL EXISTS" || echo "ssm: gone"
+
+# No remaining CloudFormation service role
+aws iam get-role --role-name "${CLAW_NAME}-cfn-exec" 2>&1 | grep -q "NoSuchEntity" \
+  && echo "cfn-exec role: gone" || echo "cfn-exec role: STILL EXISTS"
 ```
 
 Report to the user:
 - Stack status (gone)
 - EBS volume status (gone, or retained ID if they chose to keep it)
 - SSM parameters status (gone)
+- CloudFormation service role status (gone)
 - Reminder that the Slack app config (bot/app tokens, allowed users, home
   channel) still exists on the Slack side and can be reused for a future deploy
 

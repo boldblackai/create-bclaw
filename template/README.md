@@ -32,86 +32,128 @@ run the skill.
 IAM → Users → Create user (e.g. `bclaw-deployer`) with programmatic access (an
 access key).
 
-### 2. Attach the `bclaw-deploy` policy
+### 2. Attach the `bclaw-deploy` policy and create the service role
 
-Attach the policy in [`bclaw-deploy-policy.json`](./bclaw-deploy-policy.json)
-to the user. It grants exactly the claw create + teardown permissions, no more.
+Bclaw uses a **two-role** model so the deployer's long-lived access key is
+never root-equivalent if it leaks:
 
-Resources are tightened to the claw's name-prefixed ARNs wherever AWS lets us.
-Several statements still carry `Resource: "*"` — these are **not** laziness but
-hard AWS constraints. The action list stays narrow in every case.
+- **`bclaw-deployer`** (the human identity, attached policy
+  [`bclaw-deploy-policy.json`](./bclaw-deploy-policy.json)) — narrow powers:
+  manage the CloudFormation stack, write/read SSM secrets, shell in, scale the
+  service, debug the container instance, recover orphans during teardown, and
+  manage **one** literal role (`bclaw-cfn-exec`).
+- **`bclaw-cfn-exec`** (the CloudFormation service role, inline policy
+  [`bclaw-cfn-exec-policy.json`](./bclaw-cfn-exec-policy.json), trust
+  [`bclaw-cfn-exec-trust.json`](./bclaw-cfn-exec-trust.json)) — the broad
+  infrastructure-create lifecycle (EC2/ASG/ECS/IAM/KMS/logs) that
+  CloudFormation assumes during every deploy and the stack delete. It is
+  **not** a stack resource (the stack cannot create the role it assumes to
+  create itself), so the setup skill creates it idempotently in **Phase 0**
+  before the first deploy, and the teardown skill deletes it last.
 
-#### Why some resources stay `Resource: "*"`
+The deployer identity only ever passes `bclaw-cfn-exec` to CloudFormation
+(`iam:PassRole` conditioned to `cloudformation.amazonaws.com`); it never
+touches the infrastructure resources directly. Attach
+[`bclaw-deploy-policy.json`](./bclaw-deploy-policy.json) to the user during
+this onboarding step — the service role is created later, at deploy time.
+
+#### Deployer policy — why some resources stay `Resource: "*"`
 
 The pinning rule: **a resource can be pinned to a prefix only if its ARN is
-name-based** (CloudFormation stacks, IAM roles, ECS clusters/services, log
-groups all use names the template controls). Resources whose ARNs use
-**AWS-assigned IDs** cannot be pinned by ARN prefix — but if they support tags,
-they're constrained with `aws:ResourceTag` conditions instead (the ABAC
-pattern). The statements below carry `Resource: "*"` with **no condition** —
-the hard AWS constraints:
+name-based**. Resources whose ARNs use **AWS-assigned IDs** cannot be pinned by
+ARN prefix — but if they support tags, they're constrained with
+`aws:ResourceTag` conditions instead (the ABAC pattern). The deployer
+statements below carry `Resource: "*"` with **no condition** — the hard AWS
+constraints:
 
 | Statement | Why it stays `*` (no condition) |
 |---|---|
-| `ReadOnlyDescribe` | Merged read-only bucket: every `Describe*`/`List*` action across EC2/ASG/Logs/SSM/ECS is List-type with no resource-level support (AWS requires `*`). Also carries `ec2:DescribeImages` (the launch-template handler validates the AMI at create time) and `ecs:ListContainerInstances`. All read-only; the sensitive create/delete/mutate actions are separately scoped. |
-| `EC2NetworkingCreate` | Creating VPC/subnet/IGW/route-table/SG + `CreateTags` is safe — the resources don't exist yet to pin to. The sensitive networking **deletes** ARE tag-conditioned (`EC2NetworkingManage`, below). |
-| `EC2LaunchTemplateManage` | `AWS::EC2::LaunchTemplate` has no top-level `Tags` property (CFN can't tag it reliably), so launch-template CRUD can't be tag-scoped. Also carries `ec2:CreateTags`. Launch templates are account-scoped and low-risk; the deployer does not call `ec2:RunInstances` (the Auto Scaling Group's service-linked role launches instances), so instance-launch perms are deliberately absent from this policy. |
-| `ECSTaskDefsAndTasks` | **Task definitions do not support resource-level permissions** — `RegisterTaskDefinition`/`DescribeTaskDefinition`/`DeregisterTaskDefinition` must be `*`. `DescribeTasks`/`ListTasks` operate on tasks with runtime-assigned IDs. (Clusters and services DO support RLP and are pinned in `ECSScoped`.) |
+| `ReadOnlyDescribe` | Merged read-only bucket: every `Describe*`/`List*` action across EC2/ASG/Logs/SSM/ECS is List-type with no resource-level support (AWS requires `*`). All read-only; the sensitive create/delete/mutate actions live on `bclaw-cfn-exec`. |
+| `ECSRead` | `DescribeTaskDefinition`/`DescribeTasks`/`ListTasks` operate on runtime-assigned IDs and task-definition families with no resource-level support — AWS requires `*`. Read-only (used for probing the live service). The sensitive `RegisterTaskDefinition` write lives on `bclaw-cfn-exec`. |
 | `SSMMessages` | Amazon Message Gateway Service (`ssmmessages`) does not support resource-level permissions at all — AWS requires `Resource: "*"` for all four channel actions. Needed for `aws ecs execute-command` (ECS Exec) over the host's internet path. The sensitive `ecs:ExecuteCommand` itself IS scoped to bclaw tasks/cluster (`ECSExec`). |
-| `KMSCreateKey` | `kms:CreateKey` creates a not-yet-existing key — no ARN to pin. `kms:CreateAlias`/`kms:DeleteAlias`/`kms:PutKeyPolicy`/`kms:EnableKeyRotation`/`kms:DescribeKey` run **before the alias exists**, so they CANNOT be alias-conditioned. Also carries `sts:DecodeAuthorizationMessage` (diagnosing AccessDenied errors — no relevant resource). The sensitive `kms:Decrypt`/`kms:Encrypt` ARE alias-conditioned (`KMSUseKey`). |
-| `SSMPublicEcsAmi` | Read-only AWS-published public AMI-id parameters (`/aws/service/ecs/optimized-ami/...`). The `EcsAmiId` stack parameter is type `AWS::SSM::Parameter::Value<Image::Id>`, so CloudFormation reads these at change-set time. Public AMI-id values, not secrets. |
+| `CloudFormationGlobalMeta` | `GetTemplateSummary`/`ValidateTemplate` are account-global metadata calls with no resource ARN — AWS requires `*`. Read-only (the deploy command runs them before the change set). |
 
-**Tag-conditioned statements** (ABAC — a tag condition restricts to our
-resources; all use `Resource: "*"` except `EC2InstanceOps`, which is
-additionally ARN-scoped to `instance/*`):
+**Tag-conditioned statements** (ABAC — a tag condition restricts to the claw's
+resources; `EC2InstanceOps` is additionally ARN-scoped to `instance/*`):
 
 | Statement | Condition | What it protects |
 |---|---|---|
-| `EC2NetworkingManage` | `aws:ResourceTag/Name = bclaw*` | Can only delete/mutate the claw's own VPC/subnets/route-tables/IGW/SG. Cannot touch any other networking in the account. |
-| `EC2InstanceOps` | `aws:ResourceTag/ClawName = bclaw` (ARN-scoped to `instance/*`) | Can only read the console output of, or terminate, the claw's own container instances. Cannot touch co-tenant instances in the account. (`GetConsoleOutput` for boot/UserData debugging; `TerminateInstances` for manual force-replace — the ASG launches a successor that reattaches the EBS volume.) |
-| `EC2DataVolumeCreate` | `aws:RequestTag/Name = bclaw-data` | Can only create an EBS volume tagged `Name=bclaw-data`. Prevents creating arbitrary volumes. |
-| `EC2DataVolumeManage` | `aws:ResourceTag/Name = bclaw-data` | Can only delete/detach the claw's own data volume. |
-| `AutoScalingCreate` | `aws:RequestTag/ClawName = bclaw` | Can only create an Auto Scaling Group tagged with the claw's shared `ClawName` tag. |
-| `AutoScalingManage` | `aws:ResourceTag/ClawName = bclaw` | Can only delete/update the claw's own ASG. |
-| `KMSUseKey` | `kms:ResourceAliases = alias/bclaw-ssm` | Can only Decrypt/Encrypt/ScheduleKeyDeletion on the claw's own CMK. Cannot use any other KMS key in the account. |
+| `EC2NetworkingManage` | `aws:ResourceTag/Name = bclaw*` | Teardown recovery: can only delete/mutate the claw's own VPC/subnets/route-tables/IGW/SG left orphaned by a `FORCE_DELETE_STACK`. Cannot touch any other networking. (Network **create** lives on `bclaw-cfn-exec`.) |
+| `EC2InstanceOps` | `aws:ResourceTag/ClawName = bclaw` (ARN-scoped to `instance/*`) | `manage-bclaw` Mode 4: read the console output of, or terminate, the claw's own container instances. Cannot touch co-tenant instances. |
+| `EC2DataVolumeManage` | `aws:ResourceTag/Name = bclaw-data` | Teardown Phase 3: delete the claw's own retained data volume. |
+| `KMSUseKey` | `kms:ResourceAliases = alias/bclaw-ssm` (+ `kms:ViaService = ssm`) | Decrypt/Encrypt/ScheduleKeyDeletion only on the claw's own CMK, only via SSM. Cannot use any other key. |
 
-ARN-pinned statements (no `*`): `CloudFormation` (`stack/bclaw/*`), `IAMRoles`
-(`role/bclaw-*`), `IAMInstanceProfiles` (`instance-profile/bclaw-*`), `PassRole`
-(`role/bclaw-*` + `instance-profile/bclaw-*`), `ECSScoped` (`cluster/bclaw`,
-`service/bclaw/*`), `ECSExec` (`cluster/bclaw`, `task/bclaw/*`), `LogsScoped`
-(`log-group:/ecs/bclaw*`), `SSMSecrets` (`parameter/bclaw/*`),
-`CreateAutoScalingServiceLinkedRole` (the ASG SLR role path), and
-`DenyDirectSSMSession` (`task/bclaw/*`, a Deny).
+ARN-pinned statements (no `*`): `CloudFormation` (`stack/bclaw/*`),
+`ManageCfnExecRole` (`role/bclaw-cfn-exec` — create/delete the one service
+role), `PassRoleToCfn` (`role/bclaw-cfn-exec` → `cloudformation.amazonaws.com`),
+`ECSExec` (`cluster/bclaw`, `task/bclaw/*`), `ECSServiceManage` (`cluster/bclaw`,
+`service/bclaw/*`), `LogsRead` (`log-group:/ecs/bclaw*`), `SSMSecrets`
+(`parameter/bclaw/*`), and `DenyDirectSSMSession` (`task/bclaw/*`, a Deny).
 
-> **`PassRole` has no `iam:PassedToService` condition** — only the `Resource`
-pin to `bclaw-*` roles + instance-profiles. The condition was dropped because
-the Auto Scaling service's launch-template validation checks PassRole with a
-`PassedToService` value the single-value condition didn't match (it broke ASG
-creation). The `Resource` scope is the boundary: the deployer can only pass the
-claw's own roles.
+#### Service role (`bclaw-cfn-exec`) — the infrastructure-create lifecycle
+
+The service role's inline policy carries everything CloudFormation needs to
+realize `template.yaml` and tear it back down. It is the natural home for the
+powers that cannot be safely scoped on a human-held key:
+
+- **EC2** networking/volume/launch-template create + tag-scoped delete, plus
+  `ec2:RunInstances` + `CreateTags`
+  (`EC2NetworkingCreate`/`EC2NetworkingManage`/`EC2DataVolumeCreate`/
+  `EC2LaunchTemplateManage`). `RunInstances` is on cfn-exec (not the deployer)
+  because the Auto Scaling Group pre-validates the launch template by
+  simulating the instance launch, which requires the caller to be authorized
+  for `ec2:RunInstances`; real launches still go through the Auto Scaling
+  service-linked role.
+- **Auto Scaling** group CRUD + the autoscaling service-linked role
+  (`AutoScalingCreate`/`AutoScalingManage`/`CreateAutoScalingServiceLinkedRole`).
+- **IAM** create/delete on `role/bclaw-*` and `instance-profile/bclaw-*`
+  (`IAMRoles`/`IAMInstanceProfiles`) — the stack's exec/task/instance roles.
+- **`iam:PassRole`** on `role/bclaw-*` + `instance-profile/bclaw-*` (`PassRole`,
+  resource-scoped, **not** service-conditioned — `iam:PassedToService`-conditioning
+  breaks this stack's Auto Scaling launch-template validation; the resource scope
+  is the boundary, and cfn-exec can only pass the stack's own `bclaw-*` roles).
+- **ECS** cluster/service/task-definition write + describe (`ECSWrite`/`ECSDescribe`).
+- **KMS** key lifecycle — `CreateKey`/`CreateAlias`/`DeleteAlias`/`PutKeyPolicy`/
+  `EnableKeyRotation`/`DescribeKey` (`KMSLifecycle`, `Resource: "*"`). The
+  key-management actions cannot be alias-scoped: KMS evaluates the `PutKeyPolicy`
+  capability at `CreateKey` time, before the alias exists, so an alias condition
+  would block key creation.
+- **Logs** group create/delete/retention + tag actions (`LogsLifecycle`).
+- **SSM** public AMI-id resolution (`SSMPublicEcsAmi`) + read-only describes
+  (`ReadOnlyDescribe`).
+
+Because `bclaw-cfn-exec` is assumable **only** by `cloudformation.amazonaws.com`
+(its trust policy) and the deployer's only `iam:PassRole` for it is conditioned
+to that same service, none of these broad powers are reachable by the
+human-held key — closing the privilege-escalation chains a leaked deployer key
+otherwise opens.
 
 #### Notes
 
-- **Shell-in (ECS Exec) permissions are included.** The policy grants
-  `ecs:ExecuteCommand` scoped to the bclaw cluster + tasks (`ECSExec`), plus the
-  four `ssmmessages:*` channel actions (`SSMMessages`). These are needed by the
-  setup skill (Phases 5–6), teardown skill, and the `manage-bclaw`
-  skill. With host networking the SSM agent reaches `ssmmessages` over the
-  container instance's public IP — no NAT gateway, no VPC endpoints.
-  `ssmmessages:*` cannot be resource-scoped — see the "Why some resources
-  stay `Resource: *`" table below.
-
+- **Shell-in (ECS Exec) permissions are on the deployer.** `ECSExec` grants
+  `ecs:ExecuteCommand` scoped to the bclaw cluster + tasks; `SSMMessages`
+  grants the four `ssmmessages:*` channel actions (`ssmmessages` cannot be
+  resource-scoped). Needed by setup (Phases 6–7), teardown, and `manage-bclaw`.
   AWS additionally recommends **denying** `ssm:StartSession` on ECS tasks
-  (`DenyDirectSSMSession`). Sessions started via `ecs:ExecuteCommand` are logged;
-  sessions started via `ssm:StartSession` bypass ECS Exec logging and consume the
-  session quota. The deny blocks only direct SSM sessions on bclaw tasks — it
-  does not affect `ecs:ExecuteCommand` (different API path).
-- **No `simulate-principal-policy` pre-flight.** The policy deliberately omits
-  `iam:SimulatePrincipalPolicy` (it was dropped to stay under the 6144-char
-  managed-policy limit). Permission gaps surface as the exact `is not
-  authorized to perform` error at deploy time instead; the policy's
-  `sts:DecodeAuthorizationMessage` (in `KMSCreateKey`) lets you decode any
-  encoded denial message for precise diagnosis.
+  (`DenyDirectSSMSession`): sessions via `ecs:ExecuteCommand` are logged;
+  direct SSM sessions bypass ECS Exec logging and consume the session quota.
+- **The deployer's `iam:PassRole` is `PassedToService`-conditioned**
+  (`PassRoleToCfn`: `bclaw-cfn-exec` → `cloudformation.amazonaws.com` only). The
+  service role's `iam:PassRole` (`PassRole`) is **resource-scoped** to
+  `bclaw-*` roles/instance-profiles but **not** service-conditioned —
+  `iam:PassedToService`-conditioning breaks this stack's Auto Scaling
+  launch-template validation (the same constraint that forces cfn-exec's
+  KMS key-management actions to be unconditional). The boundary is the resource
+  scope: cfn-exec can only pass the stack's own `bclaw-*` roles, and cfn-exec
+  is itself assumable only by `cloudformation.amazonaws.com`.
+- **No `iam:SimulatePrincipalPolicy`.** The deployer policy intentionally omits
+  it (a leaked key should not be able to probe its own scope). Permission gaps
+  surface as the exact `is not authorized to perform` error at deploy time. If
+  you need the policy simulator to verify a permission split, run it from a
+  separate admin identity.
+- **`sts:DecodeAuthorizationMessage` is not granted.** To decode an encoded
+  denial message, use a separate admin identity (the deployer key deliberately
+  cannot).
 
 ### 3. Put the access key in `.env`
 
@@ -244,10 +286,11 @@ task crash-loops. In the console's KMS key picker, type `alias/bclaw-ssm`
 
 ### 4. Run the setup skill
 
-It follows a gated sequence: probe one ARM64 AZ → deploy CloudFormation (VPC,
-EBS volume, EC2 container instance + Auto Scaling Group, ECS service at
-DesiredCount 0 on the first deploy) → write SSM secrets → scale to 1 →
-overlay `agent_home/` → verify.
+It follows a gated sequence: create the CloudFormation service role
+(`bclaw-cfn-exec`) → probe one ARM64 AZ → deploy CloudFormation (VPC, EBS
+volume, EC2 container instance + Auto Scaling Group, ECS service at DesiredCount
+0 on the first deploy) → write SSM secrets → scale to 1 → overlay
+`agent_home/` → verify.
 
 `.agents/skills/setup-bclaw/SKILL.md`
 

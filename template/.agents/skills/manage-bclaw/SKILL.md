@@ -570,6 +570,8 @@ aws cloudformation deploy \
   --stack-name "$CLAW_NAME" \
   --region "$AWS_REGION" \
   --capabilities CAPABILITY_NAMED_IAM \
+  --role-arn arn:aws:iam::$(aws sts get-caller-identity \
+    --query 'Account' --output text):role/${CLAW_NAME}-cfn-exec \
   --parameter-overrides $OVERRIDES HarnessImageTag=hermes-1.9.2
 ```
 

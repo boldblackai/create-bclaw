@@ -47,6 +47,14 @@ completed before running this skill. Permissions are not pre-checked — if the
 deployer principal is missing an action, CloudFormation will surface the exact
 `is not authorized to perform` error at deploy time (Phase 2).
 
+The deployer's IAM powers are deliberately narrow: it manages the
+CloudFormation stack and a single dedicated **service role**
+(`bclaw-cfn-exec`) that CloudFormation assumes to perform the actual
+infrastructure creates. That service role is created in **Phase 0** below
+(it cannot be a stack resource — the stack needs it to exist before it can be
+created), so onboarding attaches only `bclaw-deploy-policy.json`; nothing else
+is created up front.
+
 Before starting, ensure the shell has `mise` and `direnv` active and AWS
 credentials loaded. `mise` manages `aws-cli` (see `mise.toml`); credentials
 live in `.env` (gitignored) and are exported by `direnv` (`.envrc`):
@@ -71,6 +79,56 @@ If that fails, stop — the user hasn't completed the README Setup steps yet.
 Follow these phases **in order**. Each phase has a gate that must be satisfied
 before proceeding. Use `ask_user_question` (the `clarify` tool) to confirm
 completion and collect input where called for.
+
+---
+
+### Phase 0: Create the CloudFormation service role (`${CLAW_NAME}-cfn-exec`)
+
+**Gate: AWS access confirmed (Prerequisites).**
+
+CloudFormation runs every deploy (Phase 2) and the stack delete under a
+dedicated service role, `${CLAW_NAME}-cfn-exec`, which carries the broad
+infrastructure-create lifecycle (EC2/ASG/ECS/IAM/KMS/logs) so those powers
+never sit on the deployer's long-lived access key. The role is **not** a stack
+resource — the stack cannot create the role it assumes to create itself — so
+it is created here, before the first deploy, idempotently, and deleted last in
+teardown.
+
+The role's trust policy and inline execution policy ship alongside this skill's
+deploy policy as `bclaw-cfn-exec-trust.json` (trusts only
+`cloudformation.amazonaws.com`) and `bclaw-cfn-exec-policy.json` (the lifecycle
+permissions). Run from the repo root so the `file://` paths resolve:
+
+```bash
+CLAW_NAME=bclaw                              # the claw name (fixed at generation)
+AWS_REGION=<user-provided>
+CFN_EXEC="${CLAW_NAME}-cfn-exec"
+
+# create the role if absent, else refresh its trust policy (idempotent)
+aws iam create-role \
+  --role-name "$CFN_EXEC" \
+  --assume-role-policy-document file://${CLAW_NAME}-cfn-exec-trust.json \
+  --description "CloudFormation service role for the ${CLAW_NAME} stack (assumed by cloudformation.amazonaws.com)" \
+  2>/dev/null \
+  || aws iam update-assume-role-policy \
+       --role-name "$CFN_EXEC" \
+       --policy-document file://${CLAW_NAME}-cfn-exec-trust.json
+
+# (re)apply the inline execution policy — idempotent overwrite
+aws iam put-role-policy \
+  --role-name "$CFN_EXEC" \
+  --policy-name "$CFN_EXEC" \
+  --policy-document file://${CLAW_NAME}-cfn-exec-policy.json
+
+# verify
+aws iam get-role --role-name "$CFN_EXEC" --query 'Role.RoleName' --output text
+```
+
+If `update-assume-role-policy` runs (the role already existed from a prior
+setup), `put-role-policy` still re-applies the inline policy — re-running this
+phase after editing `bclaw-cfn-exec-policy.json` is the way to update the
+service role's permissions, and it takes effect on the next `cloudformation
+deploy`. The role's ARN is passed to the deploy as `--role-arn` in Phase 2.
 
 ---
 
@@ -205,7 +263,8 @@ the stack, and handles the retained-EBS + force-delete gotchas), or for a quick
 rollback cleanup:
 
 ```bash
-aws cloudformation delete-stack --stack-name "$CLAW_NAME" --region "$AWS_REGION"
+aws cloudformation delete-stack --stack-name "$CLAW_NAME" --region "$AWS_REGION" \
+  --role-arn arn:aws:iam::$(aws sts get-caller-identity --query 'Account' --output text):role/${CLAW_NAME}-cfn-exec
 aws cloudformation wait stack-delete-complete --stack-name "$CLAW_NAME" --region "$AWS_REGION"
 ```
 
@@ -260,6 +319,8 @@ aws cloudformation deploy \
   --stack-name "$CLAW_NAME" \
   --region "$AWS_REGION" \
   --capabilities CAPABILITY_NAMED_IAM \
+  --role-arn arn:aws:iam::$(aws sts get-caller-identity \
+    --query 'Account' --output text):role/${CLAW_NAME}-cfn-exec \
   --parameter-overrides \
     ClawName="$CLAW_NAME" \
     AZ1=<az1-from-phase-1> \
@@ -269,7 +330,13 @@ aws cloudformation deploy \
   --no-disable-rollback
 ```
 
-where `<EnableProviderKey>` is resolved from `$INFER_PROVIDER` per the Phase 1
+`--role-arn` makes CloudFormation assume the `${CLAW_NAME}-cfn-exec` service
+role created in Phase 0 to perform the create/update — the deployer identity
+never touches the infrastructure resources directly (that is the whole point
+of the service role). Every deploy and every `delete-stack` MUST pass this
+flag: without it, CloudFormation falls back to the deployer's own (narrowed)
+permissions and the deploy fails on the first infra-create. where
+`<EnableProviderKey>` is resolved from `$INFER_PROVIDER` per the Phase 1
 mapping (e.g. `EnableOpenRouterKey` for openrouter). If the user selected more
 than one provider in Phase 1, add each matching `Enable*Key=true` on its own
 line. `EnableGitHubKey="$ENABLE_GH"` is safe to always pass — it's `"true"` or
