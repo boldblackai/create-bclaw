@@ -911,5 +911,4 @@ Report to the user:
   CloudFormation intrinsic shorthand (`!Equals`, `!Sub`, `!If` — valid CFN, not
   valid plain YAML). Ignore those; instead validate with cfn-lint:
   `uvx cfn-lint .agents/skills/setup-bclaw/template.yaml` (run via
-  `mise exec -- uvx cfn-lint ...`). The CFN-tag-aware
-  `scripts/validate-template.py` is a lighter structural check.
+  `mise exec -- uvx cfn-lint ...`).

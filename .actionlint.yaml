@@ -1,3 +1,8 @@
-ignore:
-  # ci.yml may use common GH Actions patterns (>> "$GITHUB_ENV") that trip shellcheck
-  - 'shellcheck reported issue'
+# actionlint config — new workflow files in .github/workflows/ are discovered
+# automatically (no file arguments needed). actionlint runs shellcheck on every
+# `run:` block.
+#
+# Do NOT add a blanket `ignore: ['shellcheck reported issue']` here — it hides
+# every shellcheck finding across every workflow. If a `run:` step genuinely
+# needs one, use a targeted inline disable on that line instead, e.g.:
+#   run: echo "$VAR"  # shellcheck disable=SC2086
