@@ -1,7 +1,7 @@
 {
   "name": "@boldblackai/create-bclaw",
-  "version": "0.3.1",
-  "description": "Scaffold a renamed Hermes Agent claw (Slack socket-mode bot on AWS ECS Fargate).",
+  "version": "1.0.0",
+  "description": "Deploy your own long-running Hermes agent on Slack + AWS",
   "type": "module",
   "publishConfig": {
     "access": "public"
