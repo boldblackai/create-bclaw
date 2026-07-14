@@ -153,6 +153,7 @@ TypeScript/JavaScript. Do not introduce eslint, prettier, or editor-specific
 config.
 
 - Check for violations: `pnpm lint` (runs `biome check .`)
+- Lint CloudFormation: `uvx cfn-lint <TEMPLATE.yaml>` (use `uv` via mise)
 - Auto-fix lint issues: `pnpm lint:fix` (runs `biome check --write .`)
 - Format only: `pnpm format` (runs `biome format --write .`)
 
