@@ -7,10 +7,22 @@
       "Action": [
         "ec2:CreateVpc",
         "ec2:CreateInternetGateway",
+        "ec2:CreateTags"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringLike": {
+          "aws:RequestTag/Name": "bclaw*"
+        }
+      }
+    },
+    {
+      "Sid": "EC2NetworkingCreateVpcChild",
+      "Effect": "Allow",
+      "Action": [
         "ec2:CreateSubnet",
         "ec2:CreateRouteTable",
-        "ec2:CreateSecurityGroup",
-        "ec2:CreateTags"
+        "ec2:CreateSecurityGroup"
       ],
       "Resource": "*"
     },
@@ -62,8 +74,7 @@
         "ec2:DeleteLaunchTemplate",
         "ec2:ModifyLaunchTemplate",
         "ec2:GetLaunchTemplateData",
-        "ec2:RunInstances",
-        "ec2:CreateTags"
+        "ec2:RunInstances"
       ],
       "Resource": "*"
     },
@@ -140,7 +151,7 @@
       ]
     },
     {
-      "Sid": "ECSWrite",
+      "Sid": "ECSWriteScoped",
       "Effect": "Allow",
       "Action": [
         "ecs:CreateCluster",
@@ -148,15 +159,21 @@
         "ecs:CreateService",
         "ecs:DeleteService",
         "ecs:UpdateService",
-        "ecs:RegisterTaskDefinition",
-        "ecs:DeregisterTaskDefinition"
+        "ecs:RegisterTaskDefinition"
       ],
       "Resource": [
         "arn:aws:ecs:*:*:cluster/bclaw",
         "arn:aws:ecs:*:*:service/bclaw/*",
-        "arn:aws:ecs:*:*:task-definition/bclaw:*",
-        "*"
+        "arn:aws:ecs:*:*:task-definition/bclaw:*"
       ]
+    },
+    {
+      "Sid": "ECSWriteGlobal",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:DeregisterTaskDefinition"
+      ],
+      "Resource": "*"
     },
     {
       "Sid": "ECSDescribe",
