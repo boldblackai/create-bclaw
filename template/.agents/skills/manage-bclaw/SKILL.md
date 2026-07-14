@@ -1,19 +1,21 @@
 ---
 name: manage-bclaw
 description: >
-  Manage a running ECS (EC2 launch type) bclaw. Three modes: (1) Overlay — push the
+  Manage a running ECS (EC2 launch type) bclaw. Four modes: (1) Overlay — push the
   repo's agent_home/ onto the bclaw's ~/.hermes (EBS-backed) to update config,
   skills, memories, system prompt, or personas without a redeploy (via ECS
   Exec); (2) Run — execute arbitrary commands on the live bclaw for inspection,
   debugging, or one-off operations (via ECS Exec); (3) Upgrade image — roll
   the running bclaw onto a new ghcr.io/boldblackai/harness tag by bumping the
-  HarnessImageTag stack parameter and redeploying (no image rebuild).
-  Companion to setup-bclaw / teardown-bclaw.
+  HarnessImageTag stack parameter and redeploying (no image rebuild);
+  (4) Host — retrieve a stuck container instance's console output or force a
+  wedged instance to replace itself, scoped to the claw's instances via
+  aws:ResourceTag/ClawName. Companion to setup-bclaw / teardown-bclaw.
 ---
 
 # Manage Harness ECS on EC2
 
-Manage a live ECS (EC2 launch type) claw. This skill handles three related tasks:
+Manage a live ECS (EC2 launch type) claw. This skill handles four related tasks:
 
 1. **Overlay** (default) — push the repo's `agent_home/` onto the claw's
    `~/.hermes` to update curated state (config, skills, memories, prompts,
@@ -29,10 +31,18 @@ Manage a live ECS (EC2 launch type) claw. This skill handles three related tasks
    the claw is single-replica and binds the Slack socket, so two tasks can't
    coexist; ~10-20s downtime during the swap). This is a CloudFormation
    stack update, not an ECS Exec operation.
+4. **Host** — operate on the underlying EC2 **container instance** rather than
+   the running task: retrieve its console output (boot/UserData log) when it
+   fails to register to ECS, or terminate a wedged instance to force the ASG
+   to launch a successor that reattaches the EBS volume. These actions are
+   scoped to the claw's own instances via `aws:ResourceTag/ClawName`. They are
+   the path when there is no running task to ECS Exec into.
 
 Modes 1 and 2 share the same prerequisites and ECS Exec transport (the
 "Shared first step" below). Mode 3 needs the same shell state and a RUNNING
-service but does not use the exec session. Determine which mode the user
+service but does not use the exec session. Mode 4 needs only the shell state
+(mise + direnv + AWS creds) and operates on the EC2 instance, not the task,
+so it works even when no task is RUNNING. Determine which mode the user
 needs from context, or ask. When in doubt, default to **Overlay** (the
 common case).
 
@@ -611,6 +621,83 @@ If the new image is bad, re-run this mode with the previous tag
 
 ---
 
+## Mode 4: Debug or force-replace the container instance
+
+Operate on the underlying **EC2 container instance** (the host) rather than the
+running ECS task. Use this when the instance itself is the problem — it failed
+to register to ECS, it is wedged but passing health checks, or you need its boot
+log. Modes 1–3 all assume a RUNNING task to ECS Exec into; Mode 4 is the path
+when there is no task (or the task is not the issue).
+
+Both actions are scoped by the `bclaw-deploy` policy's `EC2InstanceOps`
+statement to the claw's own instances (`aws:ResourceTag/ClawName`), so they
+cannot touch co-tenant instances in the same account.
+
+### Prerequisites
+
+- **Shell with mise + direnv + AWS creds** (same as the other modes). All
+  `aws` commands below assume this shell state.
+- **The claw's region** (`AWS_REGION`, default `us-east-1`) and **claw name**
+  (`CLAW_NAME`, default `bclaw`). The container instance is tagged
+  `ClawName=<claw name>` and `Name=<claw name>-instance`.
+
+Find the claw's running container instance:
+
+```bash
+INSTANCE_ID=$(aws ec2 describe-instances \
+  --filters "Name=tag:ClawName,Values=$CLAW_NAME" \
+            "Name=instance-state-name,Values=running" \
+  --region "$AWS_REGION" \
+  --query 'Reservations[].Instances[].InstanceId' --output text)
+echo "$INSTANCE_ID"
+```
+
+### get-console-output — boot / UserData debugging
+
+Retrieves the instance's console output, which captures the boot log and the
+UserData script's execution. Use when the instance fails to register to ECS — a
+UserData format error, an EBS-attach race, a mount failure — at that point there
+is no ECS task to ECS Exec into and no running agent to reach, so the console
+log is the only diagnostic.
+
+```bash
+aws ec2 get-console-output --instance-id "$INSTANCE_ID" \
+  --latest --region "$AWS_REGION" \
+  --output text --query 'Output' | tail -100
+```
+
+The output is the raw boot log (firmware, kernel, `cloud-init`, and the
+UserData script's output). `--latest` returns the output from the instance's
+current boot. Pipe through `tail` / `grep` to find the relevant section, e.g.
+`grep -i -A5 'cloud-init\|userdata\|error'`.
+
+### terminate-instances — manual force-replace
+
+Terminates the container instance, forcing the Auto Scaling Group to launch a
+successor that reattaches the retained EBS volume. Use when an instance is
+wedged-but-passing-health (ECS agent stuck, task zombie, attached volume in a
+bad state) before the ASG's health check trips — a manual kill forces the
+replacement.
+
+```bash
+aws ec2 terminate-instances --instance-ids "$INSTANCE_ID" --region "$AWS_REGION"
+```
+
+The ASG detects the termination and launches a new instance from the launch
+template; EBS state (sessions, memories, SQLite DBs on the `/data` volume)
+survives because the volume is reattached to the successor. Expect the new
+instance to take a few minutes to boot, register to ECS, and start the task.
+
+To preview the authorization decision without terminating, use `--dry-run` —
+it returns `Request would have succeeded, but DryRun flag is set` when the
+policy allows the call:
+
+```bash
+aws ec2 terminate-instances --instance-ids "$INSTANCE_ID" --dry-run --region "$AWS_REGION"
+```
+
+---
+
 ## Notes
 
 - **Exec runs as root.** `aws ecs execute-command` opens a **root** shell (see
@@ -680,7 +767,8 @@ If the new image is bad, re-run this mode with the previous tag
   Modes 1 (Overlay) and 2 (Run) mutate or inspect the live claw without
   touching the CloudFormation stack or task definition; Mode 3 (Upgrade image)
   performs an in-place stack update that re-renders the task definition and
-  triggers an ECS recreate deployment.
+  triggers an ECS recreate deployment; Mode 4 (Host) operates on the EC2
+  container instance directly, independent of the task or stack.
 
 - **Image upgrades are stack updates, not overlays.** Mode 3 bumps
   `HarnessImageTag` (a CloudFormation parameter, default e.g. `hermes-1.9.1`)

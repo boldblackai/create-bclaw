@@ -1,7 +1,7 @@
 # Tag-scoped EC2 instance-management permissions in the deployer policy
 
 **Date:** 2026-07-14
-**Status:** Proposed
+**Status:** Implemented
 
 ## Goal
 
@@ -228,32 +228,68 @@ if a future broader grant makes it load-bearing.
   --exclude=.git --exclude=.agents/skills --exclude=node_modules --exclude=dist`
   per the repo workflow.
 
-## Implementation Checklist
+## Implementation Notes
 
-- [ ] Integration cycle: add scoped `EC2InstanceOps` to
-      `/alt/integration/otacon-deploy-policy.json`; re-attach managed policy.
-- [ ] Empirically confirm `Allow` + `aws:ResourceTag/ClawName` matches for
-      `GetConsoleOutput` and `TerminateInstances` (simulator or live
-      tagged-vs-untagged test) on the `otacon` instance; confirm denial on a
-      co-tenant instance.
-- [ ] Decide `RunInstances`: drop (A) vs scope-with-`RequestTag/ClawName` (B);
-      implement.
-- [ ] Update `manage-bclaw` skill to document the new ops where relevant
-      (`get-console-output` for boot/UserData debugging; `terminate-instances`
-      for manual force-replace). Keep shipped content factual and present-tense.
-- [ ] Port back into `template/bclaw-deploy-policy.json`.
-- [ ] `pnpm test` (golden), `pnpm lint`, `pnpm exec tsc --noEmit`.
-- [ ] Reconcile `diff -rq /workspace/template /alt/integration …`.
-- [ ] Move this RFC to `Implemented`; replace this checklist with
-      implementation notes (including the empirically-resolved Allow-vs-Deny
-      answer and the RunInstances decision).
+Implemented via integration cycle on the `otacon` stack (live instance
+`i-05666b279f750b8c4`, `ClawName=otacon`), then ported back to
+`template/bclaw-deploy-policy.json`. Integration journal was discarded after
+port-back per the repo workflow.
 
-## Open questions
+### The central question — resolved empirically: `Allow` + `ResourceTag` works
 
-1. **`Allow` vs `Deny` for `TerminateInstances`.** Prior: `Allow` +
-   `ec2:ResourceTag` works (AWS canonical `ec2-tag-owner` example + resource-level
-   release). Confirm empirically in the cycle. *(Expected resolution: Allow works;
-   Deny deferred as optional hardening.)*
-2. **`RunInstances` fate.** Drop (A) or scope-with-`RequestTag` (B)? Prior: drop
-   (A) — the ASG SLR handles real launches; the deployer's `RunInstances` is
-   manual-scratch only. Resolve in the cycle.
+After adding the scoped `EC2InstanceOps` statement and re-attaching the managed
+policy, four checks confirmed the scoping end-to-end. The `--dry-run` on
+`TerminateInstances` makes the authorization decision without terminating, so
+the claw stayed up throughout the test:
+
+| Action | Target | Result |
+|---|---|---|
+| `ec2:GetConsoleOutput` | otacon instance | success (boot log returned) |
+| `ec2:GetConsoleOutput` | co-tenant instance (no `ClawName`) | `UnauthorizedOperation` |
+| `ec2:TerminateInstances --dry-run` | otacon instance | `Request would have succeeded, but DryRun flag is set` |
+| `ec2:TerminateInstances --dry-run` | co-tenant instance | `UnauthorizedOperation` |
+
+**Open question #1 resolved: pattern (a) — `Allow` + `aws:ResourceTag/ClawName` —
+is right and sufficient.** The tagged instance matches; the co-tenant is denied
+with an explicit message naming the resource ARN. The `Deny`-based pattern (b)
+is confirmed unnecessary and stays documented above as optional
+defense-in-depth only.
+
+### `RunInstances` decision — option A (drop)
+
+`ec2:RunInstances` was removed from `EC2LaunchTemplateManage`. Real launches go
+through the Auto Scaling Group's service-linked role, not the deployer; the
+deployer's `RunInstances` was manual-scratch only and is not needed. No skill
+documents a manual-launch workflow, so nothing depends on it.
+
+### What changed
+
+- `template/bclaw-deploy-policy.json` (+ the live `otacon-deploy-policy.json`):
+  new `EC2InstanceOps` statement (`ec2:GetConsoleOutput`,
+  `ec2:TerminateInstances` on `arn:aws:ec2:*:*:instance/*` gated by
+  `aws:ResourceTag/ClawName = bclaw`); `ec2:RunInstances` removed from
+  `EC2LaunchTemplateManage`.
+- `manage-bclaw` skill: new **Mode 4 — Debug or force-replace the container
+  instance**, documenting `get-console-output` (boot/UserData debugging) and
+  `terminate-instances` (manual force-replace; the ASG launches a successor
+  that reattaches the EBS volume). Content is factual/present-tense.
+- `template/README.md`: cataloged `EC2InstanceOps` in the tag-conditioned
+  statements table; corrected the `EC2LaunchTemplateManage` row (no longer
+  carries `ec2:RunInstances`).
+
+### Policy size
+
+The compact managed-policy JSON is **6111/6144 chars** for the `bclaw` template
+(6130 for `otacon`, whose name is longer). Within budget but near the limit, so
+future statement additions may require compaction (e.g. merging into
+`EC2LaunchTemplateManage` or trimming a `ReadOnlyDescribe` action).
+
+### Reconciliation note
+
+`diff -rq /workspace/template /alt/integration` reconciles cleanly for the
+files touched by this RFC (policy, manage skill, README). Pre-existing
+divergences in the integration repo unrelated to this RFC — its `AGENTS.md` and
+`README.md` still describe the pre-migration **Fargate/EFS** design while the
+template is current (EC2/EBS), and `agent_home/SOUL.md` wording differs — are
+flagged, not fixed, as out of scope (parent RFC `2026-07-13_ecs-ec2-ebs-persistent-storage`
+port-back territory).

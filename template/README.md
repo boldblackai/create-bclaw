@@ -55,18 +55,20 @@ the hard AWS constraints:
 |---|---|
 | `ReadOnlyDescribe` | Merged read-only bucket: every `Describe*`/`List*` action across EC2/ASG/Logs/SSM/ECS is List-type with no resource-level support (AWS requires `*`). Also carries `ec2:DescribeImages` (the launch-template handler validates the AMI at create time) and `ecs:ListContainerInstances`. All read-only; the sensitive create/delete/mutate actions are separately scoped. |
 | `EC2NetworkingCreate` | Creating VPC/subnet/IGW/route-table/SG + `CreateTags` is safe — the resources don't exist yet to pin to. The sensitive networking **deletes** ARE tag-conditioned (`EC2NetworkingManage`, below). |
-| `EC2LaunchTemplateManage` | `AWS::EC2::LaunchTemplate` has no top-level `Tags` property (CFN can't tag it reliably), so launch-template CRUD can't be tag-scoped. Also carries `ec2:RunInstances`/`ec2:CreateTags` (the Auto Scaling service validates the caller can run instances from the launch template — these create resources at call time, so `ResourceTag` can't apply). Launch templates are account-scoped and low-risk; the instances/volumes they launch ARE claw-tagged via the template's `TagSpecifications` (once [issue #6](https://github.com/boldblackai/create-bclaw/issues/6) — tag propagation — is fixed). |
+| `EC2LaunchTemplateManage` | `AWS::EC2::LaunchTemplate` has no top-level `Tags` property (CFN can't tag it reliably), so launch-template CRUD can't be tag-scoped. Also carries `ec2:CreateTags`. Launch templates are account-scoped and low-risk; the deployer does not call `ec2:RunInstances` (the Auto Scaling Group's service-linked role launches instances), so instance-launch perms are deliberately absent from this policy. |
 | `ECSTaskDefsAndTasks` | **Task definitions do not support resource-level permissions** — `RegisterTaskDefinition`/`DescribeTaskDefinition`/`DeregisterTaskDefinition` must be `*`. `DescribeTasks`/`ListTasks` operate on tasks with runtime-assigned IDs. (Clusters and services DO support RLP and are pinned in `ECSScoped`.) |
 | `SSMMessages` | Amazon Message Gateway Service (`ssmmessages`) does not support resource-level permissions at all — AWS requires `Resource: "*"` for all four channel actions. Needed for `aws ecs execute-command` (ECS Exec) over the host's internet path. The sensitive `ecs:ExecuteCommand` itself IS scoped to bclaw tasks/cluster (`ECSExec`). |
 | `KMSCreateKey` | `kms:CreateKey` creates a not-yet-existing key — no ARN to pin. `kms:CreateAlias`/`kms:DeleteAlias`/`kms:PutKeyPolicy`/`kms:EnableKeyRotation`/`kms:DescribeKey` run **before the alias exists**, so they CANNOT be alias-conditioned. Also carries `sts:DecodeAuthorizationMessage` (diagnosing AccessDenied errors — no relevant resource). The sensitive `kms:Decrypt`/`kms:Encrypt` ARE alias-conditioned (`KMSUseKey`). |
 | `SSMPublicEcsAmi` | Read-only AWS-published public AMI-id parameters (`/aws/service/ecs/optimized-ami/...`). The `EcsAmiId` stack parameter is type `AWS::SSM::Parameter::Value<Image::Id>`, so CloudFormation reads these at change-set time. Public AMI-id values, not secrets. |
 
-**Tag-conditioned `Resource: "*"` statements** (ABAC pattern — `*` with a
-condition that restricts to our resources only):
+**Tag-conditioned statements** (ABAC — a tag condition restricts to our
+resources; all use `Resource: "*"` except `EC2InstanceOps`, which is
+additionally ARN-scoped to `instance/*`):
 
 | Statement | Condition | What it protects |
 |---|---|---|
 | `EC2NetworkingManage` | `aws:ResourceTag/Name = bclaw*` | Can only delete/mutate the claw's own VPC/subnets/route-tables/IGW/SG. Cannot touch any other networking in the account. |
+| `EC2InstanceOps` | `aws:ResourceTag/ClawName = bclaw` (ARN-scoped to `instance/*`) | Can only read the console output of, or terminate, the claw's own container instances. Cannot touch co-tenant instances in the account. (`GetConsoleOutput` for boot/UserData debugging; `TerminateInstances` for manual force-replace — the ASG launches a successor that reattaches the EBS volume.) |
 | `EC2DataVolumeCreate` | `aws:RequestTag/Name = bclaw-data` | Can only create an EBS volume tagged `Name=bclaw-data`. Prevents creating arbitrary volumes. |
 | `EC2DataVolumeManage` | `aws:ResourceTag/Name = bclaw-data` | Can only delete/detach the claw's own data volume. |
 | `AutoScalingCreate` | `aws:RequestTag/ClawName = bclaw` | Can only create an Auto Scaling Group tagged with the claw's shared `ClawName` tag. |
