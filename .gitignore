@@ -1,9 +1,108 @@
+# Dependencies
 node_modules/
 .pnpm-store/
-dist/
 
+# Build output & TypeScript
+dist/
+*.tsbuildinfo
+
+# Test coverage
+coverage/
+*.lcov
+.nyc_output/
+
+# Caches
+.cache/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# Node runtime data
+pids/
+*.pid
+*.seed
+*.pid.lock
+.node_repl_history
+
+# Node.js diagnostic reports (https://nodejs.org/api/report.html)
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+# Environment / secrets (keep .env.example committed)
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.env.*.local
+.envrc.local
+.mise.local.toml
+
+# Packaging
 # npm pack output — publishing is a manual step, never commit tarballs
 *.tgz
 
+# Python (uvx / cfn-lint tooling)
+.venv/
+__pycache__/
+*.py[cod]
+
+# Alternative VCS
 # jj colocated VCS (when used alongside git)
 .jj/
+
+# Scratch / temporary files
+tmp/
+
+# Editors / IDEs
+# JetBrains (IntelliJ, WebStorm, PyCharm, Fleet)
+.idea/
+.fleet/
+*.iml
+
+# VS Code
+.vscode/
+.history/
+
+# Vim
+[._]*.s[a-v][a-z]
+[._]*.sw[a-p]
+[._]*.un~
+*.netrwhist
+*~
+
+# Emacs
+\#*\#
+.\#*
+auto-save-list/
+
+# Sublime Text
+*.sublime-workspace
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+.fseventsd
+.TemporaryItems
+Icon?
+
+# Windows
+Thumbs.db
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# Linux
+.directory
+.Trash-*
