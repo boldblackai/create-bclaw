@@ -2,7 +2,7 @@
 
 This directory is the **source of truth for curated claw state**. The
 `manage-bclaw` skill overlays its contents 1:1 onto the running
-claw's `/home/harness/.hermes/` (EFS-backed).
+claw's `/home/harness/.hermes/` (EBS-backed).
 
 ## What goes here
 

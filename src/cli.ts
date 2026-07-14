@@ -41,7 +41,7 @@ function printHelp(): void {
     "",
     `<name> must match ${NAME_RE.source} and be 1–59 chars long. It becomes`,
     "the CloudFormation stack name, IAM role prefix, ECS cluster/service, log",
-    "group, SSM namespace, KMS alias, and EFS tag.",
+    "group, SSM namespace, KMS alias, and EBS volume tag.",
   ].join("\n");
   console.log(help);
 }
