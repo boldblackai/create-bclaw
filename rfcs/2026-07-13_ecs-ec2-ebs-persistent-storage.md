@@ -371,9 +371,13 @@ authoritative — see the Revision block at the top)
   registration).
 - **Deploy policy**: dropped EFS + `SimulateSelf`; added EC2 volume / launch-
   template / autoscaling / instance-profile / ASG-SLR perms, the public-AMI SSM
-  read, `ec2:RunInstances`/`TerminateInstances`, `DescribeImages`, SSM
-  host-debug perms, `cloudformation:DescribeStackResources`, and
-  `sts:DecodeAuthorizationMessage`. Compacted under the 6144-char managed-policy
+  read, `ec2:RunInstances` (unscoped, in `EC2LaunchTemplateManage`),
+  `DescribeImages`, `cloudformation:DescribeStackResources`, and
+  `sts:DecodeAuthorizationMessage`. `TerminateInstances` was **not** added — it
+  and `ec2:GetConsoleOutput` (both absent from the policy) are introduced
+  tag-scoped in the 2026-07-14 tag-scoped-instance-permissions RFC. Likewise no
+  SSM host-debug perms ship: `ssm:StartSession` is explicitly denied and
+  `ssm:SendCommand` is absent. Compacted under the 6144-char managed-policy
   limit by merging statements (consolidated `ReadOnlyDescribe`, `PassRole` with
   a two-entry Resource and NO `PassedToService` condition — the condition broke
   the ASG launch-template validation).
