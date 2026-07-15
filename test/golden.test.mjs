@@ -10,6 +10,12 @@
 //   3. grep bclaw on the foo output == empty (the hard "no residual" assertion,
 //      enforced independently).
 //
+// Region substitution (rfcs/2026-07-15_region-substitution-token.md) adds a
+// second literal token, `us-east-1`→<region>, so invariants 2/3 generalize:
+//   2b. create-bclaw foo --region us-west-2 == bclaw output renamed
+//      [bclaw→foo, us-east-1→us-west-2].
+//   3b. grep us-east-1 on the foo --region us-west-2 output == empty.
+//
 // Plus CLI smoke tests for name validation and the non-empty-target guard.
 
 import assert from "node:assert/strict";
@@ -69,15 +75,23 @@ async function tree(dir) {
   return out;
 }
 
-/** Apply a literal substring replace to a tree's contents AND path components. */
-function renameTree(treeObj, from, to) {
+/**
+ * Apply an ordered list of literal substring replaces to a tree's contents
+ * AND path components. Each pair is `[from, to]`; the generator's two tokens
+ * are `[["bclaw", name], ["us-east-1", region]]`.
+ */
+function renameTree(treeObj, pairs) {
   const out = {};
   for (const [rel, content] of Object.entries(treeObj)) {
-    const newRel = rel
-      .split("/")
-      .map((s) => s.split(from).join(to))
-      .join("/");
-    const text = content.toString("utf8").split(from).join(to);
+    let newRel = rel;
+    let text = content.toString("utf8");
+    for (const [from, to] of pairs) {
+      newRel = newRel
+        .split("/")
+        .map((s) => s.split(from).join(to))
+        .join("/");
+      text = text.split(from).join(to);
+    }
     out[newRel] = Buffer.from(text, "utf8");
   }
   return out;
@@ -135,7 +149,7 @@ test("invariant 2: `create-bclaw foo` == bclaw output with bclaw→foo", async (
   assert.equal(rf.code, 0, `foo failed: ${rf.stderr}`);
   const bclawTree = await tree(path.join(tmpBclaw, "bclaw"));
   const fooTree = await tree(path.join(tmpFoo, "foo"));
-  const expected = renameTree(bclawTree, "bclaw", "foo");
+  const expected = renameTree(bclawTree, [["bclaw", "foo"]]);
   assert.deepEqual(Object.keys(fooTree).sort(), Object.keys(expected).sort(), "file sets differ");
   assert.deepEqual(fooTree, expected, "foo output is not bclaw output renamed");
 });
@@ -147,6 +161,32 @@ test("invariant 3: zero residual `bclaw` in `foo` output", async () => {
   const fooTree = await tree(path.join(tmp, "foo"));
   const hits = residual(fooTree, "bclaw");
   assert.equal(hits.length, 0, `residual bclaw found: ${JSON.stringify(hits)}`);
+});
+
+test("invariant 2b: `create-bclaw foo --region us-west-2` == bclaw output renamed both tokens", async () => {
+  const tmpBclaw = await fs.mkdtemp(path.join(os.tmpdir(), "bclaw-iv2b-b-"));
+  const tmpFoo = await fs.mkdtemp(path.join(os.tmpdir(), "bclaw-iv2b-f-"));
+  const rb = await run(["bclaw"], tmpBclaw);
+  const rf = await run(["foo", "--region", "us-west-2"], tmpFoo);
+  assert.equal(rb.code, 0, `bclaw failed: ${rb.stderr}`);
+  assert.equal(rf.code, 0, `foo --region failed: ${rf.stderr}`);
+  const bclawTree = await tree(path.join(tmpBclaw, "bclaw"));
+  const fooTree = await tree(path.join(tmpFoo, "foo"));
+  const expected = renameTree(bclawTree, [
+    ["bclaw", "foo"],
+    ["us-east-1", "us-west-2"],
+  ]);
+  assert.deepEqual(Object.keys(fooTree).sort(), Object.keys(expected).sort(), "file sets differ");
+  assert.deepEqual(fooTree, expected, "foo output is not bclaw output renamed with both tokens");
+});
+
+test("invariant 3b: zero residual `us-east-1` in `foo --region us-west-2` output", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "bclaw-iv3b-"));
+  const res = await run(["foo", "--region", "us-west-2"], tmp);
+  assert.equal(res.code, 0, `cli failed: ${res.stderr}`);
+  const fooTree = await tree(path.join(tmp, "foo"));
+  const hits = residual(fooTree, "us-east-1");
+  assert.equal(hits.length, 0, `residual us-east-1 found: ${JSON.stringify(hits)}`);
 });
 
 test("CLI: invalid names are rejected", async () => {
@@ -208,6 +248,28 @@ test("CLI: -V prints version; -v is not a version alias", async () => {
   assert.notEqual(bad.code, 0, "-v should be rejected (not a version alias)");
 });
 
+test("CLI: --region accepts a valid region", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "bclaw-reg-ok-"));
+  const res = await run(["foo", "--region", "eu-central-1"], tmp);
+  assert.equal(res.code, 0, `valid region should be accepted: ${res.stderr}`);
+});
+
+test("CLI: --region rejects an invalid region", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "bclaw-reg-bad-"));
+  const res = await run(["foo", "--region", "not-a-region"], tmp);
+  assert.notEqual(res.code, 0, "invalid region should be rejected");
+});
+
+test("CLI: a name colliding with the region token (us-east-1) is rejected", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "bclaw-reg-name-"));
+  const res = await run(["us-east-1"], tmp);
+  assert.notEqual(
+    res.code,
+    0,
+    "name == region token must be rejected to avoid region-pass corruption",
+  );
+});
+
 test("generate: renames the token inside symlink targets", async () => {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "bclaw-sym-"));
   const src = path.join(tmp, "template");
@@ -216,7 +278,24 @@ test("generate: renames the token inside symlink targets", async () => {
   await fs.writeFile(path.join(src, "bclaw-target.txt"), "hi");
   // `.template` suffix is stripped on materialize → link becomes `foo-link`
   await fs.symlink("bclaw-target.txt", path.join(src, "bclaw-link.template"));
-  await generate({ name: "foo", targetDir: out, templateDir: src });
+  await generate({ name: "foo", targetDir: out, templateDir: src, region: "us-east-1" });
   const target = await fs.readlink(path.join(out, "foo-link"));
   assert.equal(target, "foo-target.txt", "symlink target string should be renamed");
+});
+
+test("generate: substitutes the region token into contents", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "bclaw-reg-gen-"));
+  const out = path.join(tmp, "out");
+  await generate({
+    name: "foo",
+    targetDir: out,
+    templateDir: TEMPLATE,
+    region: "us-west-2",
+  });
+  const policy = await fs.readFile(path.join(out, "foo-deploy-policy.json"), "utf8");
+  assert.ok(
+    policy.includes("ssm.us-west-2.amazonaws.com"),
+    "kms:ViaService should be substituted to the chosen region",
+  );
+  assert.ok(!policy.includes("us-east-1"), "no residual us-east-1 should remain in the policy");
 });

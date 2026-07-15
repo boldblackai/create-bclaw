@@ -22,8 +22,12 @@ generates a renamed skeleton of a Hermes Agent claw repo. Running
 `npx @boldblackai/create-bclaw foo` produces a `foo/` directory whose contents
 match the bundled `template/` snapshot except every lowercase `bclaw` reference
 — file contents and file/directory names, including the SSM namespace, IAM
-scopes, and KMS alias — is renamed to `foo`. See
-`rfcs/2026-06-27_bclaw-cli-scaffolder.md` for the full design.
+scopes, and KMS alias — is renamed to `foo`. A second literal token, `us-east-1`,
+is substituted with the chosen AWS region (`--region`, default `us-east-1`) so
+region-bearing static files — notably the deployer IAM policy's `kms:ViaService`,
+which cannot use CloudFormation's `${AWS::Region}` — match the deploy region.
+See `rfcs/2026-06-27_bclaw-cli-scaffolder.md` for the full design and
+`rfcs/2026-07-15_region-substitution-token.md` for the region token.
 
 - `template/` is the **source of truth** (a Hermes Agent claw repo snapshot)
   shipped inside the npm package; edit it directly.

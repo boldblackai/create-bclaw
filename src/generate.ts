@@ -9,12 +9,22 @@ import * as path from "node:path";
  */
 const RENAME_FROM = "bclaw";
 
+/**
+ * The region token. Substituted alongside `bclaw`→`name` so the deployer IAM
+ * policy's `kms:ViaService` (a static JSON that can't use `${AWS::Region}`)
+ * matches the user's chosen region. See
+ * rfcs/2026-07-15_region-substitution-token.md.
+ */
+export const REGION_FROM = "us-east-1";
+
 /** Trailing suffix stripped from basenames on generate (e.g. `.gitignore.template` → `.gitignore`). */
 const TEMPLATE_SUFFIX = ".template";
 
 export interface GenerateOptions {
   /** The new claw name (already validated by the CLI). */
   name: string;
+  /** The AWS region to bake into the claw (already validated by the CLI). */
+  region: string;
   /** Absolute path to the output directory to create. */
   targetDir: string;
   /** Absolute path to the bundled template/ directory. */
@@ -27,7 +37,7 @@ export interface GenerateOptions {
  * and `git init` the result.
  */
 export async function generate(opts: GenerateOptions): Promise<void> {
-  const { name, targetDir, templateDir } = opts;
+  const { name, region, targetDir, templateDir } = opts;
 
   try {
     const stat = await fs.stat(templateDir);
@@ -41,14 +51,19 @@ export async function generate(opts: GenerateOptions): Promise<void> {
   }
 
   await fs.mkdir(targetDir, { recursive: true });
-  await copyTree(templateDir, targetDir, name);
+  await copyTree(templateDir, targetDir, name, region);
 
-  // Hard post-copy assertion: zero residual `bclaw` in contents and path
-  // components. Skipped when the name itself is or contains the token, because
-  // a literal grep would flag the legitimate replacement (e.g. name == "bclaw"
-  // is a no-op rename; name == "mybclaw" embeds the token).
+  // Hard post-copy assertions: zero residual `bclaw` AND (when the region is
+  // not the no-op default) zero residual `us-east-1` in contents and path
+  // components. Each is skipped when its own target embeds the token — a
+  // literal grep would flag the legitimate replacement (name == "bclaw" or
+  // name == "mybclaw" for the name token; region == "us-east-1" for the
+  // region token, which is exactly the no-op case).
   if (!name.includes(RENAME_FROM)) {
     await assertNoResidual(targetDir, RENAME_FROM);
+  }
+  if (region !== REGION_FROM) {
+    await assertNoResidual(targetDir, REGION_FROM);
   }
 
   // Best-effort VCS init — the generated dir is its own git project. Failures
@@ -61,44 +76,53 @@ export async function generate(opts: GenerateOptions): Promise<void> {
   });
 }
 
-/** Recursively copy src→dest, renaming the token in path components + contents. */
-async function copyTree(src: string, dest: string, name: string): Promise<void> {
+/**
+ * Recursively copy src→dest, renaming BOTH tokens (`bclaw`→name,
+ * `us-east-1`→region) in path components + contents (+ symlink targets).
+ */
+async function copyTree(src: string, dest: string, name: string, region: string): Promise<void> {
   await fs.mkdir(dest, { recursive: true });
   for (const entry of await fs.readdir(src, { withFileTypes: true })) {
     const srcPath = path.join(src, entry.name);
-    // Rename the `bclaw` token in path components, then strip a trailing
+    // Rename both tokens in path components, then strip a trailing
     // `.template` suffix from the basename. The suffix marks files npm's
     // packlist would otherwise drop on publish (e.g. `.gitignore`), so they
     // ship as `.gitignore.template` and materialize correctly on generate.
-    let destName = entry.name.split(RENAME_FROM).join(name);
+    let destName = entry.name.split(RENAME_FROM).join(name).split(REGION_FROM).join(region);
     if (!entry.isDirectory() && destName.endsWith(TEMPLATE_SUFFIX)) {
       destName = destName.slice(0, -TEMPLATE_SUFFIX.length);
     }
     const destPath = path.join(dest, destName);
     if (entry.isDirectory()) {
-      await copyTree(srcPath, destPath, name);
+      await copyTree(srcPath, destPath, name, region);
     } else if (entry.isSymbolicLink()) {
       const target = await fs.readlink(srcPath);
-      // Apply the token rename to the link target STRING (not the file it
-      // resolves to); otherwise a `bclaw`-bearing target survives the rename
+      // Apply both token renames to the link target STRING (not the file it
+      // resolves to); otherwise a token-bearing target survives the rename
       // and dangles, pointing at a now-nonexistent path.
       const renamedTarget =
-        typeof target === "string" ? target.split(RENAME_FROM).join(name) : target;
+        typeof target === "string"
+          ? target.split(RENAME_FROM).join(name).split(REGION_FROM).join(region)
+          : target;
       await fs.symlink(renamedTarget, destPath);
     } else {
-      await copyFile(srcPath, destPath, name);
+      await copyFile(srcPath, destPath, name, region);
     }
   }
 }
 
-async function copyFile(src: string, dest: string, name: string): Promise<void> {
+async function copyFile(src: string, dest: string, name: string, region: string): Promise<void> {
   const buf = await fs.readFile(src);
   // Every template file is text. Treat any NUL byte as binary and copy
   // verbatim so the rename never corrupts a binary blob.
   if (buf.length > 0 && buf.includes(0)) {
     await fs.writeFile(dest, buf);
   } else {
-    await fs.writeFile(dest, buf.toString("utf8").split(RENAME_FROM).join(name), "utf8");
+    await fs.writeFile(
+      dest,
+      buf.toString("utf8").split(RENAME_FROM).join(name).split(REGION_FROM).join(region),
+      "utf8",
+    );
   }
 }
 

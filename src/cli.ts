@@ -4,11 +4,16 @@ import * as path from "node:path";
 import { stdin as input, stdout as output } from "node:process";
 import * as readline from "node:readline/promises";
 import { fileURLToPath } from "node:url";
-import { generate } from "./generate.js";
+import { generate, REGION_FROM } from "./generate.js";
 
 const NAME_RE = /^[a-zA-Z]([a-zA-Z0-9-]*[a-zA-Z0-9])?$/;
 const MAX_NAME_LEN = 59;
 const MIN_NAME_LEN = 1;
+const REGION_RE = /^[a-z]{2}(-gov)?-[a-z]+-[0-9]+$/;
+// The default region IS the literal token generate substitutes (us-east-1);
+// aliasing makes that equivalence explicit rather than two coincidentally-
+// equal strings.
+const DEFAULT_REGION = REGION_FROM;
 const KNOWN_FLAGS = new Set(["--force", "--version", "-V", "--help", "-h"]);
 
 const here = path.dirname(fileURLToPath(import.meta.url)); // .../dist
@@ -36,6 +41,9 @@ function printHelp(): void {
     "",
     "Options:",
     "  --force       write into a non-empty target (merges; overwrites existing files)",
+    "  --region <r>  AWS region to bake into the claw (default us-east-1).",
+    "                Substituted into the deployer IAM policy's kms:ViaService so",
+    "                the claw works in that region. See README for details.",
     "  --version, -V print version and exit",
     "  --help, -h    show this help and exit",
     "",
@@ -52,6 +60,10 @@ function isNonEmptyDir(dir: string): boolean {
 
 function nameRule(): string {
   return `must match ${NAME_RE.source} and be ${MIN_NAME_LEN}–${MAX_NAME_LEN} chars`;
+}
+
+function regionRule(): string {
+  return `must match ${REGION_RE.source} (an AWS region like us-east-1, eu-west-1, us-gov-west-1)`;
 }
 
 function validName(s: string): boolean {
@@ -80,6 +92,22 @@ async function askName(): Promise<string> {
       const s = (answer ?? "").trim() || "bclaw";
       if (validName(s)) return s;
       process.stderr.write(`${nameRule()} — try again\n`);
+    }
+  } finally {
+    rl.close();
+  }
+}
+
+async function askRegion(): Promise<string> {
+  const rl = readline.createInterface({ input, output });
+  rl.on("SIGINT", cancelled);
+  try {
+    while (true) {
+      const answer = await rl.question(`AWS region? (${DEFAULT_REGION}) `).catch(() => null);
+      if (answer === null) cancelled();
+      const s = (answer ?? "").trim() || DEFAULT_REGION;
+      if (REGION_RE.test(s)) return s;
+      process.stderr.write(`${regionRule()} — try again\n`);
     }
   } finally {
     rl.close();
@@ -115,8 +143,24 @@ function printNextSteps(name: string): void {
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
-  const flags = args.filter((a) => a.startsWith("-"));
-  const positional = args.filter((a) => !a.startsWith("-"));
+  // Parse args. `--region <value>` (or `--region=<value>`) consumes its value
+  // so it is never mistaken for the positional name.
+  const flags: string[] = [];
+  const positional: string[] = [];
+  let region: string | undefined;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--region") {
+      if (i + 1 >= args.length) fail("--region requires a value (see --help)");
+      region = args[++i];
+      continue;
+    }
+    if (a.startsWith("--region=")) {
+      region = a.slice("--region=".length);
+      continue;
+    }
+    (a.startsWith("-") ? flags : positional).push(a);
+  }
   const force = flags.includes("--force");
 
   if (flags.includes("--version") || flags.includes("-V")) {
@@ -148,6 +192,21 @@ async function main(): Promise<void> {
   if (!validName(name)) {
     fail(`invalid name "${name}": ${nameRule()}`);
   }
+  // Reject a name containing the region token — the region substitution pass
+  // would corrupt it (us-east-1 → <region> inside the name).
+  if (name.includes(REGION_FROM)) {
+    fail(`invalid name "${name}": must not contain the region token "${REGION_FROM}"`);
+  }
+
+  // Region: flag → validate below; else prompt (interactive) or silent default
+  // (non-TTY, e.g. CI). Unlike the name, the region has a safe default.
+  let resolvedRegion = region;
+  if (resolvedRegion === undefined) {
+    resolvedRegion = process.stdin.isTTY ? await askRegion() : DEFAULT_REGION;
+  }
+  if (!REGION_RE.test(resolvedRegion)) {
+    fail(`invalid region "${resolvedRegion}": ${regionRule()}`);
+  }
 
   const targetDir = path.resolve(process.cwd(), name);
   if (isNonEmptyDir(targetDir) && !force) {
@@ -160,7 +219,7 @@ async function main(): Promise<void> {
   }
 
   try {
-    await generate({ name, targetDir, templateDir: templateDir() });
+    await generate({ name, region: resolvedRegion, targetDir, templateDir: templateDir() });
   } catch (error) {
     fail(error instanceof Error ? error.message : String(error));
   }
