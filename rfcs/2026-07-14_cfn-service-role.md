@@ -290,7 +290,7 @@ verification was live denial/allow against the real evaluated policy):
 ### Operator workflows intact
 
 Verified live: stack deploy/delete with `--role-arn`; `ecs:UpdateService` (scale
-+ force-redeploy, setup Phase 4 / teardown Phase 1 / manage Modes 1+4); ECS read
+— force-redeploy, setup Phase 4 / teardown Phase 1 / manage Modes 1+4); ECS read
 (`DescribeServices`/`DescribeTasks`/`ListTasks`); `ecs:ExecuteCommand` (auth
 passes — the Session Manager plugin is a separate local install, not a policy
 concern); `manage-bclaw` Mode 4 (`GetConsoleOutput` + `TerminateInstances --dry-run`,
@@ -337,7 +337,7 @@ UPDATE-only probes are insufficient for a service-role port-back.**
   inline execution policy (the full infra-create lifecycle). Inline policy is
   **6215** chars, under the ~10240-char inline-policy limit.
 - **`setup-bclaw` skill**: new **Phase 0** (idempotent `create-role`/`update-assume-role-policy`
-  + `put-role-policy`); Phase 2 deploy (and the 2-pre rollback cleanup) pass
+  - `put-role-policy`); Phase 2 deploy (and the 2-pre rollback cleanup) pass
   `--role-arn`; prerequisites note the two-role model.
 - **`teardown-bclaw` skill**: Phase 2 `delete-stack` passes `--role-arn`; new
   **Phase 6** (delete inline policy, then role); verification renumbered to

@@ -2,7 +2,7 @@
 
 ## Rules
 
-* Use a TDD workflow when writing code.
+- Use a TDD workflow when writing code.
 
 ## RFCs
 
@@ -61,11 +61,11 @@ steps and current-state facts only.
 
 ## Layout: Generator Repo + Integration Repo
 
-Since it doesn't make sense to deploy changes made in /workspace (its just templates + generator), we use an integration 
+Since it doesn't make sense to deploy changes made in /workspace (its just templates + generator), we use an integration
 repository instead (`/alt/integration`), which has AWS creds and represents a live, deployed bclaw we can make changes to.
 
 - `/workspace` (no aws access): the `create-bclaw` project, it creates project skeletons from `template/`
-- `/alt/integration` (aws access via direnv): a project created from `create-bclaw`; we edit and iterate on THIS repo, and 
+- `/alt/integration` (aws access via direnv): a project created from `create-bclaw`; we edit and iterate on THIS repo, and
 integrate ("port back") changes back into `/workspace/template/` once we verify they work.
 
 ### Workflow conventions
@@ -196,7 +196,9 @@ or weaken individual strict flags.
 All third-party action references in `.github/workflows/` must be pinned to their
 full 40-character commit SHA with a version tag in a trailing comment:
 
-    uses: owner/repo@<sha> # <tag>
+```yaml
+uses: owner/repo@<sha> # <tag>
+```
 
 Never use tag-only references (e.g. `actions/checkout@v5`). When adding or
 updating an action, resolve the tag to a SHA using
@@ -216,3 +218,19 @@ automatically — no file arguments needed. CI gets actionlint from `mise.toml`
 via the `jdx/mise-action` step (alongside oxlint/oxfmt), so there is no longer a
 separate in-workflow version to keep in sync — `mise.toml` is the single source.
 When the version changes, update `mise.toml` first and run `mise install`.
+
+## Markdown Linting
+
+This project lints Markdown with **markdownlint-cli2**. Configuration lives in
+`.markdownlint-cli2.jsonc`.
+
+- Lint Markdown only: `pnpm lint:md`
+- Lint everything (Markdown + JS/TS + actions): `pnpm lint`
+
+The config enables all default rules (`default: true`) and configures/disables
+specific ones — each with an inline comment explaining why. Do not disable a
+rule to silence a violation; either fix the Markdown or, if the disable is
+genuinely justified, add it with a comment naming the concrete reason.
+`template/` and `dist/` are in the `ignores` array (they are bundled/compiled
+output, not hand-authored) — add generated paths there rather than letting them
+fail lint.

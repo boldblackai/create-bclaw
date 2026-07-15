@@ -1,0 +1,10 @@
+{
+  "config": {
+    "default": true,
+    // long lines are common in RFC prose, inline JSON/CFN snippets, and URLs
+    "MD013": false,
+    // this repo uses dash-style lists throughout AGENTS.md and README.md
+    "MD004": { "style": "dash" },
+  },
+  "ignores": ["node_modules/", "dist/", "template/"],
+}

@@ -78,7 +78,7 @@ prose, the `template.yaml` `AZ1` fallback), reducing deploy-time friction.
 Today the generator applies one literal replace: `bclaw` → `name`. This RFC
 generalizes it to an **ordered list** of `(from, to)` token pairs:
 
-```
+```text
 [ ("bclaw", name), ("us-east-1", region) ]
 ```
 
