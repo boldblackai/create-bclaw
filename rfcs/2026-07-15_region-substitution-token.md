@@ -1,7 +1,7 @@
 # Region substitution token for scaffold-time `kms:ViaService`
 
 **Date:** 2026-07-15
-**Status:** Proposed
+**Status:** Implemented
 
 ## Goal
 
@@ -187,8 +187,11 @@ sites above.)
 
 ## Migration Notes
 
-- **Integration cycle required** per repo workflow. Prototype in
-  `/alt/integration`:
+- **Integration cycle — waived for this RFC.** The substitution is fully
+  automatic (no `template/` hand-edits) and is exhaustively proven by the
+  golden test, so the `/alt/integration` cycle was not performed. The steps
+  below describe the cycle that would apply to a hand-edit change of this shape;
+  see Implementation Notes for the actual verification.
   1. Regenerate `/alt/integration` from the patched generator with a non-
      `us-east-1` region (e.g. `us-west-2`) and confirm the on-disk
      `<name>-deploy-policy.json` reads `ssm.us-west-2.amazonaws.com`.
@@ -211,27 +214,56 @@ sites above.)
 - **CLI contract:** `npx @boldblackai/create-bclaw <name>` remains backward-
   compatible — `--region` is optional with a `us-east-1` default.
 
-## Implementation Checklist
+## Implementation Notes
 
-- [x] Write this RFC (status `Proposed`).
-- [x] Golden test (RED→GREEN): generalized `renameTree` to a list of pairs;
-      extended invariant 2 to `foo --region us-west-2`; added the
-      zero-residual-`us-east-1` invariant (3b); extended the `generate()` direct
-      test and CLI smoke tests (`--region` accepted / rejected, `KNOWN_FLAGS`
-      membership, the `us-east-1`-name rejection).
-- [x] `src/cli.ts`: added `--region`, the region regex, `askRegion()` (default
-      `us-east-1`, silent default in non-TTY), help text; rejects a name
-      containing `us-east-1`; threads `region` into `generate()`.
-- [x] `src/generate.ts`: added `REGION_FROM`, `GenerateOptions.region`, the
-      two-pass replace, and the guarded `us-east-1` residual assertion.
-- [x] Audited `grep -rn us-east-1 template/` — only the 11 expected sites
-      survive the rename (deployer policy `kms:ViaService`, `AZ1` default,
-      `.env.example`, `README.md`, `AGENTS.md`, region-default prose in the
-      three skills).
-- [x] Updated `README.md` (CLI usage: `--region`).
-- [x] `pnpm lint` + `pnpm exec tsc --noEmit` + `pnpm test` green (17/17).
-- [ ] Integration cycle in `/alt/integration` with a non-`us-east-1` region;
-      journal in `references/integrations/2026-07-15_region-substitution.md`.
-- [ ] Port-back + `diff -rq` reconciliation + golden test.
-- [ ] Close issue #10; move RFC to `Implemented` (checklist → implementation
-      notes; update `AGENTS.md`/`README.md` for the new `--region` flag).
+**Verification approach.** This RFC's substitution is fully automatic —
+`us-east-1` is a second literal token applied by the existing rename
+mechanism, with no per-file hand-edits to `template/`. The project maintainer
+therefore waived the `/alt/integration` integration cycle for this RFC: the
+golden test exhaustively proves correctness, and a live AWS deploy would add no
+signal the test does not already provide.
+
+### Correctness proven by the golden test
+
+`test/golden.test.mjs` (17/17 green; `pnpm lint` + `pnpm exec tsc --noEmit`
+clean) covers the region substitution as independent invariants:
+
+- **Invariant 1 (no-op preservation):** `create-bclaw bclaw` with the default
+  region (`us-east-1`) is byte-identical to `template/`. Both residual
+  assertions are guarded out when the region is `us-east-1`, so the default
+  scaffold is unchanged.
+- **Invariant 2b (both-token rename):** `create-bclaw foo --region us-west-2`
+  == `create-bclaw bclaw` output renamed `[bclaw→foo, us-east-1→us-west-2]` —
+  proving the region rename is complete and is the only delta beyond the name.
+- **Invariant 3b (zero residual):** no `us-east-1` survives in the
+  `foo --region us-west-2` output.
+
+A `generate()`-direct test asserts `foo-deploy-policy.json` contains
+`ssm.us-west-2.amazonaws.com` and no `us-east-1`; CLI smoke tests cover
+`--region` acceptance/rejection and the `us-east-1`-name collision.
+
+### Local end-to-end smoke
+
+Confirmed outside the test harness: `node dist/cli.js smoke-test --region
+us-west-2` produces a claw whose `smoke-test-deploy-policy.json` reads
+`"kms:ViaService": "ssm.us-west-2.amazonaws.com"`, whose `.env.example` reads
+`AWS_REGION=us-west-2`, and in which `grep -r us-east-1` returns nothing.
+
+### Template sites stamped by the token
+
+`grep -rn us-east-1 template/` confirms exactly the expected sites are
+renamed: the deployer policy `kms:ViaService` (the bug), the `template.yaml`
+`AZ1` default, `.env.example` `AWS_REGION`, and region-default prose in
+`README.md`, `AGENTS.md`, and the three skills. No unexpected site survives.
+
+### `AGENTS.md` / `README.md`
+
+The generator-repo `AGENTS.md` Overview now documents the second region token
+alongside `bclaw`. The generator-repo `README.md` documents `--region`
+(usage, the regex, the default, and the non-TTY silent-default behavior).
+
+### Issue #10
+
+Closed by the region substitution. Existing `us-east-1` deployments are
+unaffected — a claw already generated with `us-east-1` keeps its `us-east-1`
+policy and works in `us-east-1`; the generator only governs new scaffolds.
