@@ -287,6 +287,10 @@ volume honors POSIX ownership).
 ```bash
 DEST_B64=/tmp/.ah_update.b64          # staging path on the container
 CHUNK_SIZE=30000                      # bytes per exec round-trip (see Notes)
+B64_SIZE=$(wc -c < /tmp/agent_home.b64)  # re-derive here: Phase 1's B64_SIZE
+                                         # variable doesn't survive a fresh
+                                         # shell (each code block is its own
+                                         # shell), and the verify step needs it.
 
 # --- split the base64 into chunk files locally (numeric suffixes) ---
 rm -f /tmp/ah_chunk_*
@@ -314,10 +318,16 @@ for f in /tmp/ah_chunk_*; do
 done
 
 # --- verify the staged base64 length matches the local source ---
+# DO NOT parse this with `tr -dc '0-9'`: the exec PTY prints a line like
+#   Starting session with SessionId: ecs-execute-command-9r7tqcdnqtrpjct34yjupfuif4
+# whose SessionId contains digits. `tr -dc '0-9'` merges those with the real
+# count and yields garbage (992 -> "67327272499264992"), tripping a false
+# LENGTH MISMATCH. Instead, wrap the value in unique markers and extract the
+# substring between them — the SessionId's digits then can't interfere.
 REMOTE_LEN=$(aws ecs execute-command --cluster "$CLAW_NAME" --task "$TASK_ARN" \
   --container hermes --interactive \
-  --command "wc -c < $DEST_B64" \
-  --region "$AWS_REGION" 2>/dev/null | tr -dc '0-9')
+  --command "sh -c 'echo SIZEBEG\$(wc -c < $DEST_B64)SIZEEND'" \
+  --region "$AWS_REGION" 2>/dev/null | grep -o 'SIZEBEG[0-9]*SIZEEND' | grep -oE '[0-9]+')
 echo "local=${B64_SIZE} remote=${REMOTE_LEN}"
 [ "$REMOTE_LEN" = "$B64_SIZE" ] || { echo "LENGTH MISMATCH — aborting before extract"; exit 1; }
 ```
@@ -463,12 +473,15 @@ Every `execute-command` result includes boilerplate you must strip when parsing
 output programmatically (see Notes for details):
 
 - `The Session Manager plugin was installed successfully...`
-- `Starting session with SessionId: ...`
+- `Starting session with SessionId: ecs-execute-command-<base62>` ← the
+  SessionId **contains digits**, so `tr -dc '0-9'` is unsafe for numbers (it
+  merges them with your value — see Notes). Use the marker approach instead.
 - `Cannot perform start session: EOF`
 - Every line ends with `\r\n` from the PTY.
 
-For numeric extraction: pipe through `tr -dc '0-9'`. For file content: pipe
-through `sed 's/\r$//'`.
+For numeric extraction: wrap the value in `SIZEBEG…SIZEEND` markers and
+`grep -o` between them (see Notes) — **not** `tr -dc '0-9'`. For file content,
+pipe through `sed 's/\r$//'`.
 
 ---
 
@@ -712,14 +725,21 @@ aws ec2 terminate-instances --instance-ids "$INSTANCE_ID" --dry-run --region "$A
 - **Exec PTY output noise.** Every `execute-command` result includes boilerplate
   lines you must strip when parsing output programmatically:
   - `The Session Manager plugin was installed successfully. Use the AWS CLI to start a session.`
-  - `Starting session with SessionId: ...`
+  - `Starting session with SessionId: ecs-execute-command-<base62>` ← the
+    SessionId **contains digits**, so `tr -dc '0-9'` does *not* isolate your
+    number — it concatenates them with the real value (a `wc -c` of `992`
+    became `67327272499264992` in practice, tripping a false length-mismatch).
   - `Cannot perform start session: EOF`
   - Every line ends with `\r\n` (carriage return) from the PTY.
 
-  For numeric parsing (e.g. `wc -c`), pipe through `tr -dc '0-9'` to extract
-  just the digits. For file content, pipe through `sed 's/\r$//'`. When using
-  `execute_code` to drive exec calls, filter with regex rather than string
-  matching — the boilerplate lines vary by plugin version.
+  For **numeric** parsing, do *not* rely on `tr -dc '0-9'` (the SessionId's
+  digits pollute it) — wrap the value in unique markers and extract the
+  substring between them: run `--command "sh -c 'echo SIZEBEG\$(...)SIZEEND'"`
+  then `| grep -o 'SIZEBEG[0-9]*SIZEEND' | grep -oE '[0-9]+'`. The markers make
+  the SessionId's digits irrelevant. For **file content**, pipe through
+  `sed 's/\r$//'`. When using `execute_code` to drive exec calls, filter with
+  regex rather than string matching — the boilerplate lines vary by plugin
+  version.
 
 - **Overlay preserves runtime state.** Because `tar x` only writes files present
   in the archive, the claw's `sessions/`, runtime caches, `~/.config/gh`
