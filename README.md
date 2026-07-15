@@ -82,7 +82,8 @@ is a TTY you'll be prompted; otherwise the default is used silently.
 pnpm install          # installs deps + builds dist/ (prepare)
 pnpm build            # tsc
 pnpm exec tsc --noEmit  # typecheck only
-pnpm lint             # biome check .
+pnpm lint             # oxlint .
+pnpm format:check     # oxfmt --check (CI gate)
 pnpm test             # tsc && node --test (golden test)
 ```
 

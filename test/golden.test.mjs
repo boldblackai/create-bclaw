@@ -67,7 +67,9 @@ async function tree(dir) {
       if (e.name === ".git") continue;
       const p = path.join(d, e.name);
       const r = rel ? `${rel}/${e.name}` : e.name;
+      // eslint-disable-next-line no-await-in-loop -- recursive directory traversal; depth-first walk, inherently sequential
       if (e.isDirectory()) await walk(p, r);
+      // eslint-disable-next-line no-await-in-loop -- recursive directory traversal; depth-first walk, inherently sequential
       else out[r] = await fs.readFile(p);
     }
   }
@@ -136,7 +138,11 @@ test("invariant 1: `create-bclaw bclaw` output == template/", async () => {
   // on-disk template keeps them, so normalize both sides before comparing.
   const generated = stripTemplateKeys(await tree(path.join(tmp, "bclaw")));
   const tmpl = stripTemplateKeys(await tree(TEMPLATE));
-  assert.deepEqual(Object.keys(generated).sort(), Object.keys(tmpl).sort(), "file sets differ");
+  assert.deepEqual(
+    Object.keys(generated).toSorted(),
+    Object.keys(tmpl).toSorted(),
+    "file sets differ",
+  );
   assert.deepEqual(generated, tmpl, "contents differ from template/");
 });
 
@@ -150,7 +156,11 @@ test("invariant 2: `create-bclaw foo` == bclaw output with bclaw→foo", async (
   const bclawTree = await tree(path.join(tmpBclaw, "bclaw"));
   const fooTree = await tree(path.join(tmpFoo, "foo"));
   const expected = renameTree(bclawTree, [["bclaw", "foo"]]);
-  assert.deepEqual(Object.keys(fooTree).sort(), Object.keys(expected).sort(), "file sets differ");
+  assert.deepEqual(
+    Object.keys(fooTree).toSorted(),
+    Object.keys(expected).toSorted(),
+    "file sets differ",
+  );
   assert.deepEqual(fooTree, expected, "foo output is not bclaw output renamed");
 });
 
@@ -176,7 +186,11 @@ test("invariant 2b: `create-bclaw foo --region us-west-2` == bclaw output rename
     ["bclaw", "foo"],
     ["us-east-1", "us-west-2"],
   ]);
-  assert.deepEqual(Object.keys(fooTree).sort(), Object.keys(expected).sort(), "file sets differ");
+  assert.deepEqual(
+    Object.keys(fooTree).toSorted(),
+    Object.keys(expected).toSorted(),
+    "file sets differ",
+  );
   assert.deepEqual(fooTree, expected, "foo output is not bclaw output renamed with both tokens");
 });
 
@@ -192,7 +206,9 @@ test("invariant 3b: zero residual `us-east-1` in `foo --region us-west-2` output
 test("CLI: invalid names are rejected", async () => {
   const cases = ["1starts-with-digit", "under_score", `x${"a".repeat(59)}`, "-leading-hyphen", ""];
   for (const bad of cases) {
+    // eslint-disable-next-line no-await-in-loop -- parametrized test cases run sequentially for readable, isolated output; concurrency adds no value here
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "bclaw-bad-"));
+    // eslint-disable-next-line no-await-in-loop -- parametrized test cases run sequentially for readable, isolated output; concurrency adds no value here
     const res = await run([bad], tmp);
     assert.notEqual(res.code, 0, `expected rejection for name ${JSON.stringify(bad)}`);
   }

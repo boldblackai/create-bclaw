@@ -23,17 +23,24 @@ jobs:
           node-version: 22
           cache: pnpm
 
-      # actionlint version MUST match mise.toml (v1.7.12). The download script
-      # takes the bare version (no leading v). See P009.
-      - name: Install actionlint
-        run: |
-          curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash \
-            | bash -s -- 1.7.12 /usr/local/bin
+      # mise is the single source of truth for tool versions (mise.toml). This
+      # installs the JS/TS toolchain CI runs — oxlint (linter), oxfmt
+      # (formatter), and actionlint — straight from the release assets declared
+      # there, so CI and local diverge only by mise. oxlint/oxfmt ship in the
+      # oxc-project/oxc github release; actionlint from rhysd/actionlint. The
+      # action defaults to ${{ github.token }} for github-backend downloads
+      # (avoids the 60 req/h anonymous rate limit). The actionlint version MUST
+      # still match mise.toml (v1.7.12).
+      - name: Setup mise (oxlint, oxfmt, actionlint)
+        uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
 
       - run: pnpm install --frozen-lockfile
 
-      - name: Biome lint
+      - name: Lint
         run: pnpm lint
+
+      - name: Format check
+        run: pnpm format:check
 
       - name: actionlint
         run: actionlint

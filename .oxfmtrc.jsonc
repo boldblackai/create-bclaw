@@ -1,0 +1,42 @@
+{
+  // oxfmt config — replaces Biome as the JS/TS/JSON formatter. See mise.toml
+  // for the tool install (oxfmt ships in the oxc-project/oxc github release,
+  // fetched by mise; not an npm devDependency). Run via `pnpm format`
+  // (--write) or `pnpm format:check` (--check, CI gate).
+  //
+  // The style values below are oxfmt's defaults AND exactly match the previous
+  // biome.json formatter settings (lineWidth 100 / indentWidth 2 / spaces /
+  // semicolons / double quotes), so the migration is formatting-neutral: the
+  // committed code already passes `oxfmt --check` unchanged. They're spelled
+  // out explicitly as the formatter contract.
+  "$schema": "https://raw.githubusercontent.com/oxc-project/oxc/main/npm/oxfmt/configuration_schema.json",
+  "printWidth": 100,
+  "tabWidth": 2,
+  "useTabs": false,
+  "semi": true,
+  "singleQuote": false,
+
+  // OFF: oxfmt sorts package.json keys by default, which would alphabetize
+  // package.json's deliberate hand-curated field order (name/version/type at
+  // the top; keywords/license/repository at the bottom). We format the JSON
+  // but must NOT reorder its keys.
+  "experimentalSortPackageJson": false,
+
+  // What oxfmt does NOT touch:
+  //   - dist, template        generated output + bundled cluster snapshot
+  //   - .oxfmtrc.jsonc,       hand-curated tool config (this file; oxlint config;
+  //     .oxlintrc.json        markdownlint config). oxfmt's default trailingComma
+  //                           "all" would add trailing commas to these JSONC files
+  //                           — a JSONC trailing comma is circular for oxfmt to
+  //                           reformat its own config, and risks breaking parsers.
+  //                           They're authored config, not generated code. (Strict
+  //                           .json manifests like package.json / tsconfig.json
+  //                           stay in scope — JSON forbids trailing commas, so
+  //                           they pass clean.)
+  "ignorePatterns": [
+    "dist",
+    "template",
+    ".oxfmtrc.jsonc",
+    ".oxlintrc.json"
+  ]
+}

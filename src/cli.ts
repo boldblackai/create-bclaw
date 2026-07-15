@@ -87,6 +87,7 @@ async function askName(): Promise<string> {
   rl.on("SIGINT", cancelled);
   try {
     while (true) {
+      // eslint-disable-next-line no-await-in-loop -- interactive prompt: each iteration awaits the user's answer before re-prompting; cannot be batched
       const answer = await rl.question("Claw name? (bclaw) ").catch(() => null);
       if (answer === null) cancelled();
       const s = (answer ?? "").trim() || "bclaw";
@@ -103,6 +104,7 @@ async function askRegion(): Promise<string> {
   rl.on("SIGINT", cancelled);
   try {
     while (true) {
+      // eslint-disable-next-line no-await-in-loop -- interactive prompt: each iteration awaits the user's answer before re-prompting; cannot be batched
       const answer = await rl.question(`AWS region? (${DEFAULT_REGION}) `).catch(() => null);
       if (answer === null) cancelled();
       const s = (answer ?? "").trim() || DEFAULT_REGION;
@@ -119,6 +121,7 @@ async function askConfirm(message: string): Promise<boolean> {
   rl.on("SIGINT", cancelled);
   try {
     while (true) {
+      // eslint-disable-next-line no-await-in-loop -- interactive prompt: each iteration awaits the user's answer before re-prompting; cannot be batched
       const answer = await rl.question(`${message} [Y/n] `).catch(() => null);
       if (answer === null) cancelled();
       const a = (answer ?? "").trim().toLowerCase();
@@ -144,7 +147,10 @@ function printNextSteps(name: string): void {
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   // Parse args. `--region <value>` (or `--region=<value>`) consumes its value
-  // so it is never mistaken for the positional name.
+  // so it is never mistaken for the positional name. The first positional arg
+  // is the claw name; `positional` is built by `.push()` inside this loop (not
+  // `Array#filter`), so indexing `positional[0]` below is not a prefer-array-find
+  // smell.
   const flags: string[] = [];
   const positional: string[] = [];
   let region: string | undefined;

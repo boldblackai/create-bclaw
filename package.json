@@ -17,13 +17,13 @@
   "scripts": {
     "build": "tsc",
     "prepare": "tsc",
-    "lint": "biome check .",
-    "lint:fix": "biome check --write .",
-    "format": "biome format --write .",
+    "lint": "oxlint .",
+    "lint:fix": "oxlint --fix .",
+    "format": "oxfmt --write .",
+    "format:check": "oxfmt --check .",
     "test": "tsc && node --test"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.1",
     "@types/node": "22.20.0",
     "typescript": "^7.0.2"
   },
