@@ -53,10 +53,24 @@ the CloudFormation stack name, IAM role prefix (`<name>-exec`, `<name>-task`,
 `<name>-instance`), ECS cluster/service, log group, SSM namespace (`/<name>/`),
 KMS alias (`alias/<name>-ssm`), and EBS volume tag (`<name>-data`). The
 59-char ceiling keeps the `-exec`/`-task`/`-instance` role suffixes under
-IAM's 64-char role-name limit.
+IAM's 64-char role-name limit. A name containing the literal region token
+`us-east-1` is rejected (it would be corrupted by region substitution).
+
+You can also pass the AWS region the claw will deploy into. It is substituted
+into the generated claw (notably the deployer IAM policy's `kms:ViaService`,
+which is a static JSON that can't use CloudFormation's `${AWS::Region}`):
+
+```bash
+npx @boldblackai/create-bclaw <name> --region us-west-2
+```
+
+`--region` must match `^[a-z]{2}(-gov)?-[a-z]+-[0-9]+$` (any AWS region,
+including GovCloud/China) and defaults to `us-east-1`. If omitted and stdin
+is a TTY you'll be prompted; otherwise the default is used silently.
 
 ### Options
 
+- `--region <region>` — AWS region to bake into the claw (default `us-east-1`). Substituted into the deployer IAM policy's `kms:ViaService` so the claw works in that region.
 - `--force` — generate into a non-empty target directory, merging with existing files (default: refuse).
 - `--version`, `-V` — print the version.
 - `--help`, `-h` — show help.
