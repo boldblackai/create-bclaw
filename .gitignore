@@ -1,9 +1,33 @@
+# Dependencies
 node_modules/
 .pnpm-store/
-dist/
 
-# npm pack output — publishing is a manual step, never commit tarballs
+# Build output & TypeScript
+dist/
+*.tsbuildinfo
+
+# Test coverage
+coverage/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment / secrets (template/.env.example stays committed)
+.env
+.env.local
+.env.*.local
+.mise.local.toml
+
+# Packaging — publishing is a manual step, never commit tarballs
 *.tgz
 
 # jj colocated VCS (when used alongside git)
 .jj/
+
+# Scratch / temporary files
+tmp/
