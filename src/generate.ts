@@ -1,5 +1,13 @@
 import { spawn } from "node:child_process";
-import { promises as fs } from "node:fs";
+import {
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import * as path from "node:path";
 
 /**
@@ -32,26 +40,30 @@ export interface GenerateOptions {
 }
 
 /**
- * Copy `template/` → `targetDir/`, applying the literal `bclaw`→`name` replace
- * to file contents AND path components, then assert no residual token remains
- * and `git init` the result.
+ * Copy `template/` → `targetDir/`, applying BOTH literal token replaces
+ * (`bclaw`→`name`, `us-east-1`→`region`) to file contents AND path components,
+ * then assert no residual token remains and `git init` the result. The copy +
+ * residual scan are synchronous recursive walks (depth-first: a directory must
+ * be listed before its entries are recursed into, so the steps are inherently
+ * sequential); only `git init` is async (a spawned process). See .oxlintrc.json.
  */
 export async function generate(opts: GenerateOptions): Promise<void> {
   const { name, region, targetDir, templateDir } = opts;
 
   try {
-    const stat = await fs.stat(templateDir);
+    const stat = statSync(templateDir);
     if (!stat.isDirectory()) {
       throw new Error(`not a directory`);
     }
   } catch (error) {
     throw new Error(
       `template not found at ${templateDir} (${error instanceof Error ? error.message : error})`,
+      { cause: error },
     );
   }
 
-  await fs.mkdir(targetDir, { recursive: true });
-  await copyTree(templateDir, targetDir, name, region);
+  mkdirSync(targetDir, { recursive: true });
+  copyTree(templateDir, targetDir, name, region);
 
   // Hard post-copy assertions: zero residual `bclaw` AND (when the region is
   // not the no-op default) zero residual `us-east-1` in contents and path
@@ -60,10 +72,10 @@ export async function generate(opts: GenerateOptions): Promise<void> {
   // name == "mybclaw" for the name token; region == "us-east-1" for the
   // region token, which is exactly the no-op case).
   if (!name.includes(RENAME_FROM)) {
-    await assertNoResidual(targetDir, RENAME_FROM);
+    assertNoResidual(targetDir, RENAME_FROM);
   }
   if (region !== REGION_FROM) {
-    await assertNoResidual(targetDir, REGION_FROM);
+    assertNoResidual(targetDir, REGION_FROM);
   }
 
   // Best-effort VCS init — the generated dir is its own git project. Failures
@@ -80,9 +92,9 @@ export async function generate(opts: GenerateOptions): Promise<void> {
  * Recursively copy src→dest, renaming BOTH tokens (`bclaw`→name,
  * `us-east-1`→region) in path components + contents (+ symlink targets).
  */
-async function copyTree(src: string, dest: string, name: string, region: string): Promise<void> {
-  await fs.mkdir(dest, { recursive: true });
-  for (const entry of await fs.readdir(src, { withFileTypes: true })) {
+function copyTree(src: string, dest: string, name: string, region: string): void {
+  mkdirSync(dest, { recursive: true });
+  for (const entry of readdirSync(src, { withFileTypes: true })) {
     const srcPath = path.join(src, entry.name);
     // Rename both tokens in path components, then strip a trailing
     // `.template` suffix from the basename. The suffix marks files npm's
@@ -94,9 +106,9 @@ async function copyTree(src: string, dest: string, name: string, region: string)
     }
     const destPath = path.join(dest, destName);
     if (entry.isDirectory()) {
-      await copyTree(srcPath, destPath, name, region);
+      copyTree(srcPath, destPath, name, region);
     } else if (entry.isSymbolicLink()) {
-      const target = await fs.readlink(srcPath);
+      const target = readlinkSync(srcPath);
       // Apply both token renames to the link target STRING (not the file it
       // resolves to); otherwise a token-bearing target survives the rename
       // and dangles, pointing at a now-nonexistent path.
@@ -104,21 +116,21 @@ async function copyTree(src: string, dest: string, name: string, region: string)
         typeof target === "string"
           ? target.split(RENAME_FROM).join(name).split(REGION_FROM).join(region)
           : target;
-      await fs.symlink(renamedTarget, destPath);
+      symlinkSync(renamedTarget, destPath);
     } else {
-      await copyFile(srcPath, destPath, name, region);
+      copyFile(srcPath, destPath, name, region);
     }
   }
 }
 
-async function copyFile(src: string, dest: string, name: string, region: string): Promise<void> {
-  const buf = await fs.readFile(src);
+function copyFile(src: string, dest: string, name: string, region: string): void {
+  const buf = readFileSync(src);
   // Every template file is text. Treat any NUL byte as binary and copy
   // verbatim so the rename never corrupts a binary blob.
   if (buf.length > 0 && buf.includes(0)) {
-    await fs.writeFile(dest, buf);
+    writeFileSync(dest, buf);
   } else {
-    await fs.writeFile(
+    writeFileSync(
       dest,
       buf.toString("utf8").split(RENAME_FROM).join(name).split(REGION_FROM).join(region),
       "utf8",
@@ -127,33 +139,38 @@ async function copyFile(src: string, dest: string, name: string, region: string)
 }
 
 /** Walk root (skipping .git) and fail if any file content, path, or symlink target has the token. */
-async function assertNoResidual(root: string, token: string): Promise<void> {
+function assertNoResidual(root: string, token: string): void {
   const hits: string[] = [];
-  async function scan(dir: string): Promise<void> {
-    for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
+  function scan(dir: string): void {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
       if (entry.name === ".git") continue;
       const p = path.join(dir, entry.name);
       const rel = path.relative(root, p);
       if (entry.name.includes(token)) hits.push(`path:   ${rel}`);
       if (entry.isDirectory()) {
-        await scan(p);
+        scan(p);
       } else if (entry.isSymbolicLink()) {
         // Inspect the link target STRING. readFile would follow the link —
         // reading the target's contents (or throwing ENOENT on a dangling
         // link) — and miss a token encoded in the target path itself.
-        const linkTarget = await fs.readlink(p).catch(() => "");
+        let linkTarget = "";
+        try {
+          linkTarget = readlinkSync(p);
+        } catch {
+          linkTarget = "";
+        }
         if (typeof linkTarget === "string" && linkTarget.includes(token)) {
           hits.push(`symlink: ${rel} -> ${linkTarget}`);
         }
       } else {
-        const buf = await fs.readFile(p);
+        const buf = readFileSync(p);
         if (!(buf.length > 0 && buf.includes(0)) && buf.toString("utf8").includes(token)) {
           hits.push(`content: ${rel}`);
         }
       }
     }
   }
-  await scan(root);
+  scan(root);
   if (hits.length > 0) {
     throw new Error(
       `residual "${token}" found after rename (${hits.length} sites):\n  ${hits.slice(0, 25).join("\n  ")}`,

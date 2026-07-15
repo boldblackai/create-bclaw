@@ -129,10 +129,11 @@ mise instead.
 - Install all declared tools: `mise install` (then `mise trust` on a fresh clone)
 - Run one-off commands with correct versions: `mise exec -- <command>`
 
-`mise.toml` pins `node` and `github:rhysd/actionlint`. pnpm is **not** a mise
-tool — it is managed by corepack via the `packageManager` field (see Package
-Manager). If you change a tool version, update `mise.toml` and run `mise install`
-to apply.
+`mise.toml` pins every tool (`node`, `uv`, `github:rhysd/actionlint`, plus
+`oxlint` + `oxfmt` via the `oxc-project/oxc` github backend — see Linting).
+pnpm is **not** a mise tool — it is managed by corepack via the `packageManager`
+field (see Package Manager). If you change a tool version, update `mise.toml`
+and run `mise install` to apply.
 
 ## Package Manager
 
@@ -152,20 +153,30 @@ gitignored.
 
 ## Linting and Formatting
 
-This project uses **Biome** for both linting and formatting
-TypeScript/JavaScript. Do not introduce eslint, prettier, or editor-specific
-config.
+This project uses **oxlint** for linting and **oxfmt** for formatting
+TypeScript/JavaScript. Both are **mise tools** (declared in `mise.toml`), not
+npm devDependencies. Do not introduce eslint, prettier, biome, or
+editor-specific config.
 
-- Check for violations: `pnpm lint` (runs `biome check .`)
-- Lint CloudFormation: `uvx cfn-lint <TEMPLATE.yaml>` (use `uv` via mise)
-- Auto-fix lint issues: `pnpm lint:fix` (runs `biome check --write .`)
-- Format only: `pnpm format` (runs `biome format --write .`)
+- Lint: `pnpm lint` (runs `oxlint .`) — the CI gate.
+- Auto-fix lint issues: `pnpm lint:fix` (runs `oxlint --fix .`).
+- Format: `pnpm format` (runs `oxfmt --write .`); `pnpm format:check`
+  (runs `oxfmt --check .`) is the read-only CI gate.
 
-Configuration lives in `biome.json`. The `@biomejs/biome` version is pinned
-exactly in `package.json` devDependencies; the `$schema` URL in `biome.json`
-must match that version — if you bump Biome, bump both in the same change.
-`biome.json` ignores `dist/` and `template/` (via `vcs.useIgnoreFile`
-+ explicit excludes) so the compiled output and bundled snapshot are never linted.
+oxlint config lives in `.oxlintrc.json`; oxfmt config lives in `.oxfmtrc.jsonc`.
+Both tools ship as per-platform archives inside the single `oxc-project/oxc`
+GitHub release (tag `apps_v<N>`, which bundles matching oxlint + oxfmt versions —
+e.g. `apps_v1.74.0` carries oxlint 1.74.0 and oxfmt 0.59.0). A distinct
+`[tool_alias]` per binary is required so each gets its own install directory;
+`asset_pattern` per platform (under `[tools.<alias>.platforms]`) selects the
+right archive since `matching` is broken in the installed mise rev. When you
+bump them, change the single `version = "apps_v<N>"` line for both aliases in
+`mise.toml` (keep them on the same release) and run `mise install`. Both
+configs ignore `dist/` and `template/` so the compiled output and bundled
+snapshot are never linted/formatted; oxfmt additionally ignores the
+hand-curated tool-config dotfiles (`.oxfmtrc.jsonc`, `.oxlintrc.json`) and
+disables `experimentalSortPackageJson` to preserve `package.json`'s deliberate
+field order.
 
 Before finishing any code change, run `pnpm lint`.
 
@@ -201,6 +212,7 @@ via pnpm — activate mise before running it. actionlint also runs shellcheck on
 every `run:` block.
 
 Configuration lives in `.actionlint.yaml`. New workflow files are discovered
-automatically — no file arguments needed. The CI install step receives the bare
-version (`1.7.12`) and it must match mise's `v1.7.12` tag; when it changes,
-update `mise.toml` first and the CI step second.
+automatically — no file arguments needed. CI gets actionlint from `mise.toml`
+via the `jdx/mise-action` step (alongside oxlint/oxfmt), so there is no longer a
+separate in-workflow version to keep in sync — `mise.toml` is the single source.
+When the version changes, update `mise.toml` first and run `mise install`.
