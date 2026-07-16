@@ -68,7 +68,7 @@ because an untagged instance would be denied the boot-time volume attach and
 parent RFC exists to fix.
 
 Instance tagging is confirmed healthy on the live `otacon` stack today
-(`i-05666b279f750b8c4` carries `Name`/`ClawName` plus the propagated
+(`<instance-id>` carries `Name`/`ClawName` plus the propagated
 `aws:cloudformation:*` / `aws:autoscaling:*` tags). Gating operator-facing
 instance perms on the same `ClawName` tag *reinforces* that contract rather than
 introducing a new dependency on it: the same tag key that the data path already
@@ -231,7 +231,7 @@ if a future broader grant makes it load-bearing.
 ## Implementation Notes
 
 Implemented via integration cycle on the `otacon` stack (live instance
-`i-05666b279f750b8c4`, `ClawName=otacon`), then ported back to
+`<instance-id>`, `ClawName=otacon`), then ported back to
 `template/bclaw-deploy-policy.json`. Integration journal was discarded after
 port-back per the repo workflow.
 
