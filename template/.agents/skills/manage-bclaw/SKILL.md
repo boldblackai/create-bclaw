@@ -41,7 +41,7 @@ Manage a live ECS (EC2 launch type) claw. This skill handles four related tasks:
 Modes 1 and 2 share the same prerequisites and ECS Exec transport (the
 "Shared first step" below). Mode 3 needs the same shell state and a RUNNING
 service but does not use the exec session. Mode 4 needs only the shell state
-(mise + direnv + AWS creds) and operates on the EC2 instance, not the task,
+(mise + AWS creds) and operates on the EC2 instance, not the task,
 so it works even when no task is RUNNING. Determine which mode the user
 needs from context, or ask. When in doubt, default to **Overlay** (the
 common case).
@@ -81,13 +81,12 @@ common case).
    No mise/asdf plugin exists for this tool — `~/.local/bin` is the pragmatic
    install path.
 
-4. **Shell with mise + direnv + AWS creds** (same as setup/teardown):
+4. **Shell with mise + AWS creds** (same as setup/teardown):
 
 ```bash
 eval "$(/usr/local/bin/mise activate bash)" \
-  && eval "$(direnv hook bash)" \
-  && cd /workspace \
-  && eval "$(direnv export bash)"
+  && mise trust /workspace \
+  && cd /workspace
 ```
 
 All `aws` commands in this skill assume this shell state.
@@ -494,7 +493,7 @@ revision and ECS rolls the task — **no image rebuild** (the signed upstream
 image is used as-is). EBS-backed state (sessions, memories, `~/.config/gh`)
 survives the roll; only the container image changes.
 
-**Gate: shell state active (mise + direnv + AWS creds); `CLAW_NAME` +
+**Gate: shell state active (mise + AWS creds); `CLAW_NAME` +
 `AWS_REGION` collected and the service is `RUNNING` (shared first step, up to
 the RUNNING check).** Mode 3 is a CloudFormation stack update — it does not
 need the ECS Exec session, the Session Manager plugin, or `TASK_ARN`.
@@ -650,7 +649,7 @@ cannot touch co-tenant instances in the same account.
 
 ### Prerequisites
 
-- **Shell with mise + direnv + AWS creds** (same as the other modes). All
+- **Shell with mise + AWS creds** (same as the other modes). All
   `aws` commands below assume this shell state.
 - **The claw's region** (`AWS_REGION`, default `us-east-1`) and **claw name**
   (`CLAW_NAME`, default `bclaw`). The container instance is tagged

@@ -55,15 +55,15 @@ infrastructure creates. That service role is created in **Phase 0** below
 created), so onboarding attaches only `bclaw-deploy-policy.json`; nothing else
 is created up front.
 
-Before starting, ensure the shell has `mise` and `direnv` active and AWS
-credentials loaded. `mise` manages `aws-cli` (see `mise.toml`); credentials
-live in `.env` (gitignored) and are exported by `direnv` (`.envrc`):
+Before starting, ensure the shell has `mise` active and AWS credentials
+loaded. `mise` manages `aws-cli` (see `mise.toml`); credentials live in
+`.env` (gitignored) and are loaded by `mise` via the `[env] _.file` entry in
+`mise.toml`:
 
 ```bash
 eval "$(/usr/local/bin/mise activate bash)" \
-  && eval "$(direnv hook bash)" \
-  && cd /workspace \
-  && eval "$(direnv export bash)"
+  && mise trust /workspace \
+  && cd /workspace
 ```
 
 All `aws` commands in this skill assume this shell state. Verify the caller:
