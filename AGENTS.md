@@ -119,6 +119,8 @@ To aid in porting back changes, keep a journal of issues we encountered during a
 
 ONLY add issues, do not talk about plans or implementation details (the rfc is for that, just link to it)
 
+Once the port-back is complete and the golden test passes, **delete the journal** — it served its purpose and retaining stale journals adds noise.
+
 ## Tool Versions
 
 This project uses `mise.toml` as the single source of truth for all tool and
