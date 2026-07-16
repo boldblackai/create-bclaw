@@ -1,7 +1,7 @@
 {
   "name": "@boldblackai/create-bclaw",
   "version": "1.0.0",
-  "description": "Deploy your own long-running Hermes agent on Slack + AWS",
+  "description": "CLI to generate bclaw repositories",
   "type": "module",
   "publishConfig": {
     "access": "public"
@@ -47,5 +47,5 @@
     "type": "git",
     "url": "git+https://github.com/boldblackai/create-bclaw.git"
   },
-  "homepage": "https://github.com/boldblackai/create-bclaw#readme"
+  "homepage": "https://bclaw.sh"
 }
