@@ -1,5 +1,3 @@
-# AWS credentials / region — loaded by .envrc (direnv). Never commit.
+# AWS credentials / region — loaded by mise ([env] _.file in mise.toml). Never
+# commit.
 .env
-
-# direnv internal cache
-.direnv/
