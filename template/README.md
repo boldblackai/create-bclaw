@@ -12,8 +12,8 @@ skills in `.agents/skills/`.
 
 ## Tooling
 
-`mise` manages all tools (`aws-cli`, `direnv`, `jj`) — see `mise.toml`. Do not
-install system-wide. Activate mise in every shell:
+`mise` manages all tools (`aws-cli`, `jj`) — see `mise.toml`. Do not install
+system-wide. Activate mise in every shell:
 
 ```bash
 eval "$(/usr/local/bin/mise activate bash)" && mise trust
@@ -165,14 +165,13 @@ AWS_SECRET_ACCESS_KEY=...
 AWS_REGION=us-east-1
 ```
 
-`.envrc` sources `.env` via direnv. Activate direnv in every shell that runs
-`aws`:
+`mise` loads `.env` via the `[env] _.file` entry in `mise.toml`. Activate mise
+in every shell that runs `aws`:
 
 ```bash
 eval "$(/usr/local/bin/mise activate bash)" \
-  && eval "$(direnv hook bash)" \
-  && cd /workspace \
-  && eval "$(direnv export bash)"
+  && mise trust /workspace \
+  && cd /workspace
 ```
 
 Verify:

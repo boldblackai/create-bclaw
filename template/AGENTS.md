@@ -11,16 +11,15 @@ You can use web-search-prime to look things up that aren't obvious in the reposi
 
 ## Tooling
 
-- Use `mise` for all tool installation (`aws-cli`, `direnv`, `jj`). Add tools
+- Use `mise` for all tool installation (`aws-cli`, `jj`). Add tools
   to `mise.toml` — do not install system-wide. Activate mise in every shell:
   `eval "$(/usr/local/bin/mise activate bash)"`, then `mise trust`.
-- AWS credentials live in `.env` (gitignored) and are exported by `direnv`
-  (`.envrc` sources `.env`). In every shell that runs `aws`:
+- AWS credentials live in `.env` (gitignored) and are loaded by `mise` via the
+  `[env] _.file` entry in `mise.toml`. In every shell that runs `aws`:
   ```bash
   eval "$(/usr/local/bin/mise activate bash)" \
-    && eval "$(direnv hook bash)" \
-    && cd /workspace \
-    && eval "$(direnv export bash)"
+    && mise trust /workspace \
+    && cd /workspace
   ```
 - `.env` holds `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` (or `AWS_PROFILE`)
   and `AWS_REGION`. Never commit it.
