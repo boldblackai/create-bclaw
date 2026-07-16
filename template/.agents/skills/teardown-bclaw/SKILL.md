@@ -25,14 +25,13 @@ the final step, after the stack is gone.
 
 ## Prerequisites
 
-Before starting, ensure the shell has `mise`, `direnv`, and AWS credentials
-loaded (same as setup):
+Before starting, ensure the shell has `mise` and AWS credentials loaded
+(same as setup):
 
 ```bash
 eval "$(/usr/local/bin/mise activate bash)" \
-  && eval "$(direnv hook bash)" \
-  && cd /workspace \
-  && eval "$(direnv export bash)"
+  && mise trust /workspace \
+  && cd /workspace
 ```
 
 All `aws` commands in this skill assume this shell state.

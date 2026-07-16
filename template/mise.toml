@@ -1,5 +1,7 @@
 [tools]
 aws-cli = "latest"
-direnv = "latest"
 jj = "latest"
 uv = "latest"
+
+[env]
+_.file = ".env"

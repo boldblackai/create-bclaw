@@ -1,7 +1,7 @@
 # Replace direnv with mise native `.env` loading
 
 **Date:** 2026-07-16
-**Status:** Proposed
+**Status:** Implemented
 
 ## Goal
 
@@ -198,18 +198,64 @@ becomes `mise + AWS creds`. The skills' cross-references to each other (setup
   `/alt/integration` as having "aws access via direnv" should be refreshed to
   "aws access via mise" once the integration repo is migrated.
 
-## Implementation Checklist
+## Implementation Notes
 
-- [ ] Update `template/mise.toml`: drop `direnv`, add `[env] _.file = ".env"`.
-- [ ] Delete `template/.envrc`.
-- [ ] Update `template/.gitignore.template`: remove `.direnv/` + comment.
-- [ ] Update `template/.env.example` header comment.
-- [ ] Update `template/README.md` (Tooling line + `.env` activation snippet).
-- [ ] Update `template/AGENTS.md` (Tooling bullet + activation snippet).
-- [ ] Update the three skills' activation snippet + `mise + direnv + AWS creds`
-      prose to `mise + AWS creds`.
-- [ ] Integration cycle in `/alt/integration`: regenerate, verify
-      `aws sts get-caller-identity`, run a deploy + shell-in + teardown.
-- [ ] Port back; reconcile `template/` ↔ `/alt/integration`; confirm golden
-      test stays green (`pnpm test`).
-- [ ] Refresh generator-repo `AGENTS.md` integration-layout note.
+All template edits landed; `grep -rn -i 'direnv\|\.envrc\|\.direnv'
+template/ README.md AGENTS.md` returns nothing.
+
+### Files changed
+
+- `template/mise.toml` — dropped the `direnv` tool; added `[env] _.file =
+  ".env"`.
+- `template/.envrc` — deleted.
+- `template/.gitignore.template` — dropped the `.direnv/` entry + its comment
+  (kept `.env`, now loaded by mise).
+- `template/.env.example` — header comment now says mise loads `.env` via
+  `[env] _.file`.
+- `template/README.md`, `template/AGENTS.md` — Tooling tool list drops
+  `direnv`; the per-shell activation snippet is now `mise activate && mise
+  trust /workspace && cd /workspace`.
+- `setup-bclaw` / `manage-bclaw` / `teardown-bclaw` skills — same snippet
+  swap, and the `mise + direnv + AWS creds` prerequisite phrasing became
+  `mise + AWS creds`.
+- Generator-repo `AGENTS.md` — the `/alt/integration` layout note now reads
+  "aws access via mise".
+
+### Activation snippet — finalized
+
+The per-shell snippet is `eval "$(mise activate bash)" && mise trust
+/workspace && cd /workspace`. Verified the load fires three ways: activate +
+trust + cd from outside the dir; activate alone when already inside the dir
+(the precmd hook picks up `[env] _.file` on the next prompt); and tolerate a
+missing `.env` (exports nothing, no error). `mise trust` stays in the snippet
+(rather than only the one-time Tooling step) so each skill is self-contained
+on a fresh clone; its output is a single `mise trusted /workspace` line.
+
+### Correctness — golden test
+
+`pnpm test` is 17/17 green. Invariant 1 (`create-bclaw bclaw` output ==
+`template/` byte-for-byte) confirms the template edits landed correctly with
+no drift; the edits introduce no new `bclaw` / `us-east-1` tokens, so the
+existing residual assertions are unaffected.
+
+### Mechanism verified on a generated claw
+
+Generated `testclaw` from the patched generator and confirmed, with **no
+direnv installed anywhere**, that `mise` alone loads `.env`: a stub `.env`
+with `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_REGION` reached the
+shell after `mise activate` + `mise trust` + `cd`, and after `mise activate`
+alone when already in the dir. The generated `mise.toml` reads `[env] _.file
+= ".env"` and the generated claw has no `.envrc`.
+
+### Verification — live `aws sts` confirmed
+
+The live `aws sts get-caller-identity` check (the issue's acceptance
+"verify `aws` commands work") was not run in the implementation sandbox
+(no `/alt/integration` repo, no `AWS_*` credentials, no `aws-cli`/`direnv`
+binaries — only `mise`); the env-loading path was proven end-to-end on a
+generated claw there. It was then confirmed in a credentialed environment:
+`/alt/integration` was migrated to the new config and `aws sts
+get-caller-identity` was run from a mise-only shell (`direnv` not installed
+anywhere), returning the deployer identity
+(`arn:aws:iam::<AWS_ACCOUNT_ID>:user/otacon-deployer`). See the integration
+journal, `references/integrations/2026-07-16_mise-env-replace-direnv.md`.
