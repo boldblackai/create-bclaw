@@ -3,6 +3,7 @@
 ## Rules
 
 - Use a TDD workflow when writing code.
+- Always redact AWS identifiers (account IDs, resource ARNs, instance IDs, etc.) in RFCs, PRs, PR comments, commit messages, and any other text checked into the repository. Use placeholders like `<account-id>`, `<resource-id>`, or a descriptive label instead.
 
 ## RFCs
 
