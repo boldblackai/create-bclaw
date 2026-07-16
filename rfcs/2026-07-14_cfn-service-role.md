@@ -261,7 +261,7 @@ the same change.
 ## Implementation Notes
 
 Implemented via integration cycle on the `otacon` stack (deployer user
-`otacon-deployer`, account `660493448574`, region `us-east-1`), then ported
+`otacon-deployer`, account `<account-id>`, region `us-east-1`), then ported
 back to `template/`. Integration journal was discarded after port-back per the
 repo workflow.
 
