@@ -130,7 +130,7 @@ swap only the launch type (Fargate→EC2) and the storage backing
 
 ### Topology
 
-```
+```text
 VPC (10.0.0.0/16) — kept
   └─ PublicSubnetA (AZ1) — single AZ from here on (EBS is zonal)
        └─ EC2 container instance  (t4g.large, AL2023 ECS-optimized arm64 AMI)
@@ -349,6 +349,7 @@ Implemented in `/workspace/template/` and verified end-to-end in
 (golden), `pnpm lint`, and `pnpm exec tsc --noEmit` all pass after the port-back.
 
 ### What shipped (the deviations from the original *Technical Details* are
+
 authoritative — see the Revision block at the top)
 
 - **`template.yaml`**: EFS/Fargate/awsvpc/2-AZ resources removed; replaced with
@@ -383,7 +384,7 @@ authoritative — see the Revision block at the top)
   the ASG launch-template validation).
 - **Skills**: setup/manage/teardown rewritten for the new model; setup folded in
   a Phase 5 Overlay; teardown added a Phase 4 orphan-VPC sweep. `template/README.md`
-  + `template/AGENTS.md` updated for the new storage/launch model.
+  - `template/AGENTS.md` updated for the new storage/launch model.
 
 ### Verified live in `/alt/integration`
 
@@ -410,8 +411,8 @@ authoritative — see the Revision block at the top)
 
 ## Open questions
 
-_All resolved at integration-cycle kickoff (2026-07-13); see the Revision
-block at the top for the full rationale._
+*All resolved at integration-cycle kickoff (2026-07-13); see the Revision
+block at the top for the full rationale.*
 
 1. **Migrate existing EFS data onto the new EBS volume, or start fresh?** →
    **Fresh.** The suspect WAL-corrupted `state.db`/`kanban.db` are the thing
