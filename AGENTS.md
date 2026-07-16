@@ -65,7 +65,7 @@ Since it doesn't make sense to deploy changes made in /workspace (its just templ
 repository instead (`/alt/integration`), which has AWS creds and represents a live, deployed bclaw we can make changes to.
 
 - `/workspace` (no aws access): the `create-bclaw` project, it creates project skeletons from `template/`
-- `/alt/integration` (aws access via direnv): a project created from `create-bclaw`; we edit and iterate on THIS repo, and
+- `/alt/integration` (aws access via mise): a project created from `create-bclaw`; we edit and iterate on THIS repo, and
 integrate ("port back") changes back into `/workspace/template/` once we verify they work.
 
 ### Workflow conventions
