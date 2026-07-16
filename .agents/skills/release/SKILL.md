@@ -26,7 +26,7 @@ If they differ, there are unpushed commits on `main`. Inform the user:
 
 **README is up to date** — Read `README.md` and the commits since the last tag (collected in Step 3). Check whether any commit introduces new CLI flags/options (`--region`, `--force`, etc.), changes the name validation rules, alters generator behavior, or changes what the generated claw contains — and isn't already reflected in `README.md`. If gaps are found, list them and ask the user to update `README.md` before continuing:
 
-> "Aborting: README.md appears out of date. The following changes may need documentation: <list>. Update README.md and re-run the release."
+> "Aborting: README.md appears out of date. The following changes may need documentation: `<list>`. Update README.md and re-run the release."
 
 ## Step 2: Determine the new version
 
