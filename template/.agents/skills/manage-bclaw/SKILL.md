@@ -488,7 +488,7 @@ pipe through `sed 's/\r$//'`.
 
 Roll the running claw onto a new `ghcr.io/boldblackai/harness` tag. The image
 tag is a CloudFormation parameter (`HarnessImageTag`, default e.g.
-`hermes-1.9.1`); bumping it and redeploying creates a new task-definition
+`hermes-1.9.2`); bumping it and redeploying creates a new task-definition
 revision and ECS rolls the task — **no image rebuild** (the signed upstream
 image is used as-is). EBS-backed state (sessions, memories, `~/.config/gh`)
 survives the roll; only the container image changes.
@@ -508,7 +508,7 @@ aws ecs describe-tasks --cluster "$CLAW_NAME" \
     --query 'taskArns[0]' --output text)" \
   --region "$AWS_REGION" \
   --query 'tasks[0].containers[0].image' --output text
-# → ghcr.io/boldblackai/harness:hermes-1.9.1
+# → ghcr.io/boldblackai/harness:hermes-1.9.2
 ```
 
 And what the stack is parameterized with:
@@ -566,7 +566,7 @@ version bump is just this edit plus the redeploy in Step 4, then commit:
 # .agents/skills/setup-bclaw/template.yaml
 HarnessImageTag:
   Type: String
-  Default: hermes-1.9.2     # ← was hermes-1.9.1
+  Default: hermes-1.9.3     # ← was hermes-1.9.2
 ```
 
 > To roll without touching the repo, skip this edit and add
@@ -584,7 +584,7 @@ aws cloudformation deploy \
   --capabilities CAPABILITY_NAMED_IAM \
   --role-arn arn:aws:iam::$(aws sts get-caller-identity \
     --query 'Account' --output text):role/${CLAW_NAME}-cfn-exec \
-  --parameter-overrides $OVERRIDES HarnessImageTag=hermes-1.9.2
+  --parameter-overrides $OVERRIDES HarnessImageTag=hermes-1.9.3
 ```
 
 > If you edited the `Default` in Step 3, passing `HarnessImageTag` here is
@@ -621,7 +621,7 @@ aws ecs describe-tasks --cluster "$CLAW_NAME" --tasks "$TASK_ARN" \
   --output table
 ```
 
-Expect `Image` ending in `:hermes-1.9.2`, `Status = RUNNING`. Tail the gateway
+Expect `Image` ending in `:hermes-1.9.3`, `Status = RUNNING`. Tail the gateway
 log to confirm the bot reconnected:
 
 ```bash
@@ -792,7 +792,7 @@ aws ec2 terminate-instances --instance-ids "$INSTANCE_ID" --dry-run --region "$A
   container instance directly, independent of the task or stack.
 
 - **Image upgrades are stack updates, not overlays.** Mode 3 bumps
-  `HarnessImageTag` (a CloudFormation parameter, default e.g. `hermes-1.9.1`)
+  `HarnessImageTag` (a CloudFormation parameter, default e.g. `hermes-1.9.2`)
   and redeploys, creating a new task-definition revision; ECS recreates the
   task (stop-old-then-start-new).
   It does not touch EBS state — sessions, memories, and `~/.config/gh` survive.
