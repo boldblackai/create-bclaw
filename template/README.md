@@ -235,13 +235,18 @@ scope, and the CloudFormation template — so the namespace matches the claw
 name. It is a literal in the template (not derived from the `ClawName` parameter
 at deploy time), which is what lets the IAM policy pin it to a fixed ARN prefix.
 You'll enter them in the AWS console during the setup skill (Phase 3) — they're
-not CloudFormation resources, so they survive stack updates and deletes. Four
-are always required; a GitHub token is optional (enable it only if the agent
-should make authenticated `gh`/HTTPS-git calls); plus exactly one
-inference-provider key (you'll choose which in Phase 1 of the setup skill).
-Gather the values beforehand:
+not CloudFormation resources, so they survive stack updates and deletes.
 
-### Always required
+A Hermes secret-source plugin (`aws_ssm`, from
+[boldblackai/hermes-aws-ssm-secret-source](https://github.com/boldblackai/hermes-aws-ssm-secret-source),
+installed during setup) resolves every `/bclaw/*` parameter into the gateway's
+environment at startup, so adding or rotating a key is just an SSM write + task
+restart — no template edit, no redeploy. The only secret NOT resolved by the
+plugin is the optional GitHub token (`GH_TOKEN_VAL`): the on-boot `gh auth
+login` runs before Hermes starts, so it is injected the CloudFormation way (a
+stack parameter gates it). Gather the values beforehand:
+
+### Slack (required)
 
 | SSM key | What it is | Where to find it |
 |---|---|---|
@@ -252,16 +257,18 @@ Gather the values beforehand:
 
 ### Optional: GitHub authentication
 
-Enable this (Phase 1 step 3 of the setup skill → `EnableGitHubKey=true`) only
-if the agent should make authenticated `gh`/HTTPS-git calls. When enabled, the
-container runs `gh auth login --with-token` on every boot; when disabled the
-login is skipped and no token is injected.
+`/bclaw/GH_TOKEN_VAL` is the ONE secret still injected via CloudFormation
+(`secrets[]` + the `EnableGitHubKey` stack parameter, Phase 1 step 3), because
+the on-boot `gh auth login --with-token` runs before Hermes (and the aws_ssm
+plugin) start. Enable it only if the agent should make authenticated
+`gh`/HTTPS-git calls; when disabled the login is skipped and no token is
+injected.
 
 | SSM key | What it is | Where to find it |
 |---|---|---|
 | `/bclaw/GH_TOKEN_VAL` | GitHub PAT — on-boot `gh auth login` (see setup skill Phase 6a). Named `*_VAL`, not `GH_TOKEN`, to avoid `gh`'s reserved env var | https://github.com/settings/tokens |
 
-### Inference-provider key (choose one)
+### Inference-provider key (create at least one)
 
 | SSM key | What it is | Where to find it |
 |---|---|---|
@@ -269,16 +276,19 @@ login is skipped and no token is injected.
 | `/bclaw/ANTHROPIC_API_KEY` | Anthropic (direct Claude API) | https://console.anthropic.com/ |
 | `/bclaw/ZAI_API_KEY` | Z.AI / Zhipu (GLM) | https://z.ai/manage-apikey/apikey-list |
 
-Create only the one matching the provider you chose in Phase 1.
+The aws_ssm plugin resolves every provider key present in SSM, so you can
+create more than one if the gateway uses multiple providers. Create at least the
+one matching the provider you chose in Phase 1.
 
 Each parameter is a **SecureString** and must be encrypted with the claw's own
 KMS key (alias `alias/bclaw-ssm`), created by the setup skill's CloudFormation
 stack in Phase 2 — **not** the default `alias/aws/ssm`. The deployer IAM policy
 pins `kms:Decrypt`/`kms:Encrypt` to `alias/bclaw-ssm` via
-`kms:ResourceAliases`, so the task can only decrypt parameters this key
-encrypted. A parameter left under the default SSM key fails to decrypt and the
-task crash-loops. In the console's KMS key picker, type `alias/bclaw-ssm`
-(substituting your claw name) — it resolves to the key the stack just created.
+`kms:ResourceAliases`, so the claw can only decrypt parameters this key
+encrypted. A parameter left under the default SSM key fails to decrypt, so the
+aws_ssm plugin can't resolve it and the gateway runs without it. In the
+console's KMS key picker, type `alias/bclaw-ssm` (substituting your claw name) —
+it resolves to the key the stack just created.
 
 
 ## Deploy
@@ -289,7 +299,8 @@ It follows a gated sequence: create the CloudFormation service role
 (`bclaw-cfn-exec`) → probe one ARM64 AZ → deploy CloudFormation (VPC, EBS
 volume, EC2 container instance + Auto Scaling Group, ECS service at DesiredCount
 0 on the first deploy) → write SSM secrets → scale to 1 → overlay
-`agent_home/` → verify.
+`agent_home/` + install the aws_ssm plugin + merge its secrets config →
+restart → verify.
 
 `.agents/skills/setup-bclaw/SKILL.md`
 

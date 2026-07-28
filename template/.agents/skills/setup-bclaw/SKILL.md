@@ -5,7 +5,8 @@ description: >
   a running gateway. Follows a gated sequence: probe one ARM64 AZ → deploy
   CloudFormation (VPC, persistent EBS volume, a single-instance Auto Scaling
   Group, ECS service at DesiredCount 0 on the first deploy) → write SSM secrets
-  → scale to 1 → verify. Use when setting up a new bclaw on AWS or re-deploying
+  → scale to 1 → overlay agent_home/ + install the aws_ssm plugin + merge its
+  secrets config → restart → verify. Use when setting up a new bclaw on AWS or re-deploying
   after teardown. Companion to teardown-bclaw.
 ---
 
@@ -32,8 +33,8 @@ The CloudFormation stack (`template.yaml` alongside this skill) owns the VPC,
 the EBS volume, the launch template, the ASG, IAM roles (exec, task, container
 instance + instance profile), the log group, the task definition, and an ECS
 service whose `DesiredCount` is a parameter (default `1`); the setup skill
-passes `0` on the first deploy — before the SSM secrets exist, so the task
-doesn't crash-loop on missing env vars — then scales to 1. Secrets are **not**
+passes `0` on the first deploy — before the SSM secrets exist and the aws_ssm
+plugin is installed and configured (Phase 5) — then scales to 1. Secrets are **not**
 owned by the stack — they live in SSM Parameter Store as namespaced
 SecureStrings that the user writes in Phase 3. This is the piranesi pattern: it
 keeps secrets out of template diffs and lets them survive stack deletes.
@@ -150,20 +151,21 @@ Use `ask_user_question` to collect:
    - **Anthropic** — direct Claude API access
    - **Z.AI (GLM)** — Zhipu/z.ai GLM models
 
-   The provider choice determines (a) which provider API-key SSM parameter the
-   user creates in Phase 3, and (b) which `Enable*Key=true` override is passed
-   to the deploy in Phase 2. Exactly one provider key is enabled — the gateway
-   needs at least one to run. (If the user wants more than one — e.g. OpenRouter
-   plus Anthropic — they can say so via "Other" and you enable each matching
-   `Enable*Key` in Phase 2; otherwise default to a single provider.)
+   The provider choice determines which provider API-key SSM parameter the user
+   creates in Phase 3. The aws_ssm secret-source plugin resolves it (and every
+   other `/bclaw/*` secret) into the env at gateway startup, so there is no
+   per-provider stack parameter — adding or swapping a provider key later is
+   just an SSM write + task restart, no template edit or redeploy. The gateway
+   needs at least one provider key to run; create more than one if the user
+   wants (e.g. OpenRouter plus Anthropic) — every key present in SSM resolves.
 
-   Provider → stack parameter / SSM key mapping:
+   Provider → SSM key mapping:
 
-   | Provider | `Enable*Key` parameter | SSM parameter |
-   |---|---|---|
-   | openrouter | `EnableOpenRouterKey` | `/bclaw/OPENROUTER_API_KEY` |
-   | anthropic | `EnableAnthropicKey` | `/bclaw/ANTHROPIC_API_KEY` |
-   | zai | `EnableZaiKey` | `/bclaw/ZAI_API_KEY` |
+   | Provider | SSM parameter |
+   |---|---|
+   | openrouter | `/bclaw/OPENROUTER_API_KEY` |
+   | anthropic | `/bclaw/ANTHROPIC_API_KEY` |
+   | zai | `/bclaw/ZAI_API_KEY` |
 
 3. **GitHub authentication** — whether the agent should make authenticated
    `gh`/HTTPS-git calls. This is OPTIONAL: the claw is a Slack bot and runs
@@ -298,20 +300,22 @@ Only proceed to the deploy once this step reports `does not exist` (fresh
 #### 2-deploy: Create / update the stack
 
 Deploy the stack. On a **first deploy** (2-pre reported `does not exist`) pass
-`DesiredCount=0`: the task must NOT start yet, because the SSM secrets don’t
-exist — starting at 1 would make ECS fail to fetch the unconditional Slack
-secrets and repeatedly fail placement (crash-loop). Phase 4 scales it to 1 once
-the secrets exist. On a **stack update** (2-pre reported `CREATE_COMPLETE` /
-`UPDATE_COMPLETE`) pass the live service’s actual count instead — see the note
+`DesiredCount=0`: defers the first boot until the SSM secrets are written
+(Phase 3). (With only `GH_TOKEN_VAL` in `secrets[]`, the task no longer
+crash-loops on missing Slack secrets — the aws_ssm plugin carries them, and
+the gateway tolerates a no-secrets boot — but deferring keeps the sequence
+clean: the Slack bot only connects after Phase 5 installs the plugin + merges
+its config + a restart.) Phase 4 scales it to 1. On a **stack update** (2-pre
+reported `CREATE_COMPLETE` /
+`UPDATE_COMPLETE`) pass the live service's actual count instead — see the note
 after the command.
 
-Pass `--parameter-overrides` including the `Enable*Key=true` for the provider
-chosen in Phase 1 step 2 (`EnableOpenRouterKey` / `EnableAnthropicKey` /
-`EnableZaiKey`). Leave the other two at their template default `false` (omit
-them) so their secrets resolve to `AWS::NoValue` and the task doesn't try to
-fetch SSM parameters that don't exist. If the user opted into GitHub auth in
-Phase 1 step 3 (`ENABLE_GH=true`), also pass `EnableGitHubKey=true` — otherwise
-omit it (default `false`, no `GH_TOKEN_VAL` injected, on-boot login skipped):
+If the user opted into GitHub auth in Phase 1 step 3 (`ENABLE_GH=true`), pass
+`EnableGitHubKey=true`; otherwise omit it (default `false`, no `GH_TOKEN_VAL`
+injected, on-boot login skipped). There is **no provider-key stack parameter**
+— the inference-provider key (and the Slack tokens) are resolved from SSM by
+the aws_ssm plugin at gateway startup, not injected here, so the deploy
+overrides carry no `Enable*Key`:
 
 ```bash
 aws cloudformation deploy \
@@ -324,7 +328,6 @@ aws cloudformation deploy \
   --parameter-overrides \
     ClawName="$CLAW_NAME" \
     AZ1=<az1-from-phase-1> \
-    <EnableProviderKey>=true \
     EnableGitHubKey="$ENABLE_GH" \
     DesiredCount=0 \
   --no-disable-rollback
@@ -335,11 +338,8 @@ role created in Phase 0 to perform the create/update — the deployer identity
 never touches the infrastructure resources directly (that is the whole point
 of the service role). Every deploy and every `delete-stack` MUST pass this
 flag: without it, CloudFormation falls back to the deployer's own (narrowed)
-permissions and the deploy fails on the first infra-create. where
-`<EnableProviderKey>` is resolved from `$INFER_PROVIDER` per the Phase 1
-mapping (e.g. `EnableOpenRouterKey` for openrouter). If the user selected more
-than one provider in Phase 1, add each matching `Enable*Key=true` on its own
-line. `EnableGitHubKey="$ENABLE_GH"` is safe to always pass — it's `"true"` or
+permissions and the deploy fails on the first infra-create.
+`EnableGitHubKey="$ENABLE_GH"` is safe to always pass — it's `"true"` or
 `"false"` straight from Phase 1 step 3.
 
 The instance type (`InstanceType`, default `t4g.large`), the ECS-optimized AMI
@@ -363,12 +363,12 @@ edge case switched to X86_64 (then also pass `CpuArchitecture=X86_64`,
 > # then add  DesiredCount="$DESIRED"  to --parameter-overrides on the deploy
 > ```
 >
-> The provider-key and GitHub overrides are stricter — their default is `false`,
-> so omitting them reverts silently: forgetting to re-pass
-> `EnableOpenRouterKey=true` drops the provider key and the gateway comes up
-> with no model; omitting `EnableGitHubKey` reverts GitHub auth to off. Capture
-> current params with `describe-stacks` and re-pass them, then verify the live
-> task def matches intent.
+> The GitHub override is stricter — its default is `false`, so omitting it
+> reverts silently: forgetting to re-pass `EnableGitHubKey=true` turns GitHub
+> auth back off. (The inference-provider key is resolved from SSM by the aws_ssm
+> plugin, not a stack parameter, so it is unaffected.) Capture current params
+> with `describe-stacks` and re-pass them, then verify the live task def
+> matches intent.
 
 Wait for `CREATE_COMPLETE` (the `deploy` command blocks until it finishes).
 
@@ -399,15 +399,19 @@ Confirm `ClusterName`, `ServiceName`, `EbsVolumeId`, `AutoScalingGroupName`,
 **Gate: stack is `CREATE_COMPLETE`.**
 
 The claw needs SSM SecureString parameters under the `/bclaw/` namespace —
-**4 that are always required** (Slack), plus an **optional GitHub key** (only
-if `ENABLE_GH=true` from Phase 1 step 3), plus **1 inference-provider key**
-chosen in Phase 1 step 2. The namespace is hardcoded in the template
+**4 Slack tokens** (always required), the **inference-provider key** chosen in
+Phase 1 step 2, and an **optional GitHub key** (only if `ENABLE_GH=true` from
+Phase 1 step 3). The namespace is hardcoded in the template
 (not constructed from `ClawName`), which means the deployer's IAM policy can be
 scoped to `arn:aws:ssm:*:*:parameter/bclaw/*` instead of `*`. They are **not** created by CloudFormation — the user
-writes them here so they survive stack updates and deletes. The 4 Slack
-secrets are unconditional in the task definition's `secrets[]` (the task will
-not start if any is missing); the GitHub and provider keys are injected only
-because their matching `Enable*Key=true` was passed in Phase 2.
+writes them here so they survive stack updates and deletes. Every one of them
+is resolved into the container env at gateway startup by the aws_ssm
+secret-source plugin (installed in Phase 5), using the TaskRole's SSM-read
+grant — none are in the task definition's `secrets[]` except `GH_TOKEN_VAL`
+(which the on-boot `gh auth login` needs before the plugin loads). The gateway
+tolerates a boot where these are absent (it logs "No messaging platforms
+enabled" and stays RUNNING), but the Slack bot won't connect until they exist
+and the plugin is configured.
 
 Use `ask_user_question` to give the user the tables below and tell them to enter
 each parameter in the **AWS Management Console** (Systems Manager → Application
@@ -467,10 +471,10 @@ For each parameter the user creates in the console, the settings are:
 
 **Gate: verify all required parameters exist before proceeding** (values not
 displayed) — the 4 Slack secrets plus the provider key (plus `GH_TOKEN_VAL` iff
-`ENABLE_GH=true`). Only injected secrets must exist: the 4 Slack secrets are
-unconditional in `secrets[]`; the provider and GitHub keys are injected only
-because their matching `Enable*Key=true` was passed in Phase 2, so they're the
-only ones that need to be present:
+`ENABLE_GH=true`). Every parameter the plugin will resolve should exist before
+the gateway boots with the plugin configured (Phase 5); a missing one is
+non-fatal (the gateway boots without it) but the Slack tokens and the provider
+key are required for a working claw, so confirm they are present:
 
 ```bash
 PROVIDER_KEY=$(case "$INFER_PROVIDER" in
@@ -488,11 +492,10 @@ for k in $REQUIRED; do
 done
 ```
 
-Every listed parameter must resolve successfully. If any returns
-`ParameterNotFound`, the task will fail to fetch it and crash-loop (this only
-applies to secrets that are actually injected — an opt-out key you never
-enabled is `AWS::NoValue` in the task def, so its absence is fine). Do not
-proceed until all of them exist.
+Every listed parameter should resolve successfully. A missing one is
+non-fatal (the gateway boots without it), but the Slack tokens and the
+provider key are required for a working claw — do not proceed until they
+exist.
 
 ---
 
@@ -525,9 +528,14 @@ aws ssm start-session --target "$INSTANCE_ID" --region "$AWS_REGION"
 ```
 
 Once a container instance is registered, scale the service up. This starts the
-task; the ECS agent fetches the SSM parameters (via the execution role's
-`ssm:GetParameters` grant), decrypts them with KMS, and injects them as env
-vars.
+task. The only `secrets[]` entry is `GH_TOKEN_VAL` (if GitHub auth is enabled),
+which the ECS agent fetches via the execution role's `ssm:GetParameters`
+grant and decrypts with KMS. The Slack tokens and the provider key are NOT
+injected here — they are resolved from SSM by the aws_ssm plugin, which is not
+installed or configured until Phase 5. So on this first boot the gateway
+starts without Slack: it logs "No messaging platforms enabled" and stays
+RUNNING. Slack connects after Phase 5 installs the plugin + merges its
+`secrets:` config block + a restart.
 
 ```bash
 aws ecs update-service \
@@ -573,34 +581,39 @@ aws ecs describe-tasks --cluster "$CLAW_NAME" --tasks "$TASK_ARN" \
 
 Expected: `Arch = ARM64`, `Status = RUNNING`, `AZ` is the single AZ from Phase 1.
 
-#### 4c. Tail the gateway logs and confirm the bot connected
+#### 4c. Tail the gateway logs — expect a healthy boot WITHOUT Slack yet
 
 ```bash
 aws logs tail "/ecs/${CLAW_NAME}" --region "$AWS_REGION" --follow
 ```
 
-Look for the Slack socket-mode connection succeeding (e.g. a "gateway started"
-or "slack connected" line). You may also see an early `[gh-auth] login failed
-(non-fatal)` line if the GitHub login didn't take (only when GitHub auth is
-enabled — `ENABLE_GH=true`; an opt-out claw logs nothing here) — that's
-non-blocking (see Phase 6a to verify/fix). `Ctrl-C` to stop following once you
-see the gateway is up.
+The gateway starts cleanly but is NOT connected to Slack on this first boot —
+the aws_ssm plugin isn't installed or configured until Phase 5, so the Slack
+tokens aren't in the env. Expect a `WARNING gateway.run: No messaging
+platforms enabled.` line (and `No env user allowlists configured`); this is
+expected, not an error, and the gateway stays `RUNNING`. You may also see an
+early `[gh-auth] login failed (non-fatal)` line if the GitHub login didn't
+take (only when GitHub auth is enabled — `ENABLE_GH=true`; an opt-out claw
+logs nothing here) — non-blocking (see Phase 6a to verify/fix). `Ctrl-C` once
+the gateway is up; the Slack connection is confirmed in Phase 5 (after the
+plugin is configured).
 
 ---
 
-### Phase 5: Overlay agent_home/ onto the claw
+### Phase 5: Overlay, install the aws_ssm plugin, and merge the secrets config
 
-**Gate: task is `RUNNING` and the gateway connected (Phase 4).**
+**Gate: task is `RUNNING` (Phase 4).**
 
-Establish the curated baseline — config, skills, memories, system prompt,
-`SOUL.md` persona — on the claw's `/home/harness/.hermes` instead of the
-self-seeded defaults the gateway booted with in Phase 4.
+On the first boot (Phase 4) the gateway started on self-seeded defaults with
+NO secrets in the env — the aws_ssm plugin isn't installed and its `secrets:`
+config block isn't present, so Slack isn't connected yet. This phase completes
+the bootstrapping: overlay the curated `agent_home/`, install the plugin,
+merge its config block into the live `config.yaml`, then restart. After the
+restart the plugin resolves every `/bclaw/*` secret at the first env load and
+the Slack bot connects.
 
-This is the **same overlay** the `manage-bclaw` skill performs for ongoing
-updates; it owns the full procedure (tar+base64 over ECS Exec, chunked
-transfer, decode/extract/`chown`, merge-with-overwrite semantics, dry-run
-gate). Run `manage-bclaw` in **Mode 1 (Overlay)** now. Setup has already
-satisfied its entry conditions, so you do not need to re-collect them:
+You need the manage skill's ECS Exec transport for all three steps below.
+Setup has already satisfied its entry conditions:
 
 - **Claw name + region** — `$CLAW_NAME` / `$AWS_REGION` from Phase 1.
 - **A RUNNING task + `$TASK_ARN`** — from Phase 4b. This satisfies the
@@ -610,17 +623,66 @@ satisfied its entry conditions, so you do not need to re-collect them:
   first ECS Exec call of this setup, so run it to confirm the plugin works
   and the caller has exec perms.
 
+#### 5a. Overlay agent_home/ (manage-bclaw Mode 1)
+
+Establish the curated baseline — skills, memories, system prompt, `SOUL.md`
+persona — on the claw's `/home/harness/.hermes`. Run `manage-bclaw` in
+**Mode 1 (Overlay)** now; it owns the full procedure (tar+base64 over ECS
+Exec, chunked transfer, decode/extract/`chown`, merge-with-overwrite
+semantics, dry-run gate). `config.yaml` is excluded from the overlay on
+purpose (a file-level overwrite would discard non-env keys the cloud-mode
+re-seed doesn't restore) — it is handled in 5c.
+
 If `agent_home/` is absent or contains only excluded files, there is nothing
-to overlay — skip this phase; the claw keeps its self-seeded defaults.
+to overlay — skip this step; the claw keeps its self-seeded defaults.
 
-#### Restart to apply (setup-specific)
+#### 5b. Install the aws_ssm secret-source plugin
 
-`manage-bclaw` Mode 1 ends by asking whether to restart, since ongoing
-overlays often don't need one. At **first boot** the answer is always yes:
-the gateway started in Phase 4 on defaults, and the overlay's curated
-`system-prompt.md` / `SOUL.md` / skills / config are not read until the task
-restarts. Restart unconditionally (the service's recreate deployment config
-makes this a stop-old-then-start-new swap, ~10-20s downtime):
+Install the plugin that resolves the `/bclaw/*` SSM parameters into env vars
+at gateway startup. It writes into `~/.hermes/plugins/` (EBS-backed, persists
+across restarts), so this is a one-time setup step. Run it as the harness user
+(uid 1000) from an exec session (which runs as root):
+
+```bash
+aws ecs execute-command --cluster "$CLAW_NAME" --task "$TASK_ARN" \
+  --container hermes --interactive \
+  --command "sh -c 'runuser -u harness -- hermes plugins install boldblackai/hermes-aws-ssm-secret-source --enable 2>&1'" \
+  --region "$AWS_REGION"
+```
+
+Confirm it is enabled (`Status: enabled`):
+
+```bash
+aws ecs execute-command --cluster "$CLAW_NAME" --task "$TASK_ARN" \
+  --container hermes --interactive \
+  --command "sh -c 'runuser -u harness -- hermes plugins list 2>/dev/null | grep -i aws_ssm'" \
+  --region "$AWS_REGION"
+```
+
+> The plugin is inert until its `secrets:` config block is present in
+> `~/.hermes/config.yaml` (5c) AND the gateway restarts (it loads plugins at
+> startup). The `secrets.sources names unknown source(s): aws_ssm` warning
+> hermes prints is benign — it appears before #64189's post-discovery re-pull
+> resolves the source; the gateway log then shows
+> `AWS SSM Parameter Store: applied N secrets`.
+
+#### 5c. Merge the secrets config block (manage-bclaw Mode 3)
+
+The plugin's config lives in `agent_home/config.yaml` (a minimal `secrets:`
+block). The overlay excluded it, so merge it into the live
+`~/.hermes/config.yaml` at the key level — this preserves the live config's
+comments/order/env-driven keys while adding the non-env `secrets:` block
+(which survives the cloud-mode re-seed on restart). Run `manage-bclaw` in
+**Mode 3 (Merge-config)** now; it fetches the live config (byte-chunked over
+ECS Exec), runs `merge_config.py` (ruamel.yaml round-trip via `uv`), and
+pushes the merged result back. Confirm the merge when it asks.
+
+#### Restart to apply (unconditional)
+
+Restart so the gateway re-reads its config and loads the plugin. After the
+restart the plugin resolves every `/bclaw/*` secret at the first env load and
+the Slack bot connects (the service's recreate deployment config makes this a
+stop-old-then-start-new swap, ~10-20s downtime):
 
 ```bash
 aws ecs update-service --cluster "$CLAW_NAME" --service "$CLAW_NAME" \
@@ -631,11 +693,16 @@ aws ecs wait tasks-running --cluster "$CLAW_NAME" \
   --region "$AWS_REGION"
 ```
 
-Mind `manage-bclaw`'s cloud-mode `config.yaml` caveat: in cloud mode a
-restart re-seeds `config.yaml`'s env-driven keys (model/provider, API keys,
-Slack config) from the SSM parameters written in Phase 3, so overlay
-`config.yaml` only for non-env-driven keys. `SOUL.md`, `system-prompt.md`,
-skills, and memories are not env-driven and apply cleanly.
+Confirm Slack is now connected (expect an `applied N secrets` line including
+`SLACK_BOT_TOKEN`, and NO `No messaging platforms enabled` line):
+
+```bash
+aws logs tail "/ecs/${CLAW_NAME}" --region "$AWS_REGION" --since 5m 2>/dev/null \
+  | grep -iE "ssm parameter store|slack|No messaging platforms"
+```
+
+If you still see "No messaging platforms", the plugin install (5b) or merge
+(5c) didn't take — re-run that step.
 
 ---
 
@@ -728,6 +795,7 @@ Report to the user:
   live in (with ARM64 confirmation)
 - Stack name and key outputs (cluster, EBS volume ID, ASG name, SSM prefix)
 - The SSM parameter locations (4 Slack + the provider key, plus `/bclaw/GH_TOKEN_VAL` if GitHub auth was enabled — values never displayed)
+- The aws_ssm plugin is installed and its `secrets:` config merged (Phase 5); it resolves every `/bclaw/*` secret at gateway startup. Slack is connected (confirmed in Phase 5). To add or rotate a key, write the SSM param + force a new task (`aws ecs update-service --force-new-deployment`) — no template edit or redeploy.
 - GitHub auth (if enabled) is automatic on boot from `/bclaw/GH_TOKEN_VAL` (Phase 6a) — verify with `runuser -u harness -- gh auth status` from an exec session; if disabled, `gh auth status` showing "not logged in" is expected
 - How to tail logs: `aws logs tail "/ecs/${CLAW_NAME}" --follow --region "$AWS_REGION"`
 - How to shell in: the `aws ecs execute-command` snippet from Phase 6
@@ -778,13 +846,14 @@ Report to the user:
   login is **non-fatal** — a failure (bad token, GitHub outage) is logged to
   CloudWatch and the gateway still starts. `GH_TOKEN_VAL` is an **optional**
   SSM param (`/bclaw/GH_TOKEN_VAL`), gated behind the `EnableGitHubKey` stack
-  parameter (default `false`) — the same opt-in pattern as the
-  inference-provider keys (`OPENROUTER_API_KEY`, `ZAI_API_KEY`,
-  `ANTHROPIC_API_KEY`), which use `EnableOpenRouterKey`/`EnableZaiKey`/
-  `EnableAnthropicKey` (conditional `!If` entries in `secrets[]`; exactly one
-  provider key is enabled per claw, chosen in Phase 1). When GitHub auth is
-  disabled, the `Command`'s `if [ -n "$GH_TOKEN_VAL" ]` guard skips the login
-  entirely and no `GH_TOKEN_VAL` is injected. The secret is named
+  parameter (default `false`) and injected via `secrets[]` — it is the ONE
+  secret still injected by CloudFormation, because the on-boot `gh auth login`
+  runs before the aws_ssm plugin loads. (Every other secret — the Slack tokens
+  and the inference-provider keys `OPENROUTER_API_KEY`/`ZAI_API_KEY`/
+  `ANTHROPIC_API_KEY` — is resolved from SSM by the aws_ssm plugin at gateway
+  startup, so they have no stack parameter and no `secrets[]` entry.) When
+  GitHub auth is disabled, the `Command`'s `if [ -n "$GH_TOKEN_VAL" ]` guard
+  skips the login entirely and no `GH_TOKEN_VAL` is injected. The secret is named
   `GH_TOKEN_VAL`, **not** `GH_TOKEN`, deliberately: when the reserved `GH_TOKEN`
   env var is present, `gh auth login --with-token` refuses to store the token
   (prints "the GH_TOKEN environment variable is being used", exits 1) — a gh
@@ -871,40 +940,38 @@ Report to the user:
   with no model). Capture current params with `describe-stacks` and re-pass
   them, then verify the live task def matches intent.
 
-- **Adding new SSM secrets.** To forward an additional SSM parameter into the
-  container env, add an entry to the task definition's `secrets[]` in
-  `template.yaml`, then deploy a stack update. There are two patterns,
-  both already used in the template:
+- **Adding new SSM secrets.** To forward an additional secret into the
+  gateway's env, just put it in SSM as a SecureString under `/bclaw/` (encrypted
+  with the claw's CMK, `alias/${CLAW_NAME}-ssm`), then force a new task so the
+  aws_ssm plugin resolves it at startup:
+  ```bash
+   aws ssm put-parameter --name "/bclaw/MY_API_KEY" \
+     --type SecureString --key-id "alias/${CLAW_NAME}-ssm" \
+     --value "<value>" --region "$AWS_REGION"
+  aws ecs update-service --cluster "$CLAW_NAME" --service "$CLAW_NAME" \
+    --force-new-deployment --region "$AWS_REGION"
+  ```
+  The leaf name becomes the env var (`/bclaw/MY_API_KEY` → `MY_API_KEY`;
+  sub-paths flatten, e.g. `/bclaw/db/PASSWORD` → `DB_PASSWORD`). No
+  `template.yaml` edit, no CloudFormation redeploy, no new stack parameter —
+  the plugin already covers `parameter/bclaw/*`. Rotation is the same flow
+  (`put-parameter --overwrite` + restart). This works for any secret consumed
+  inside Hermes after the plugin loads (the Slack tokens, the provider keys,
+  skill API keys).
 
-  - **Required (unconditional).** The 4 core Slack secrets (SLACK_*)
-    are plain entries — the task fails to start if any is missing:
-    ```yaml
-    - { Name: FOO_KEY, ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/bclaw/FOO_KEY" }
-    ```
-  - **Optional (conditional).** `GH_TOKEN_VAL` and the inference-provider keys
-    (`OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, `ZAI_API_KEY`) are gated behind
-    an `Enable*Key` stack parameter so the template works without any given one.
-    Exactly one provider key is enabled per claw (chosen in Phase 1); GitHub auth
-    is opt-in via `EnableGitHubKey`. This needs three
-    coordinated pieces: a `String` parameter (default `"false"`,
-    `AllowedValues: ["true","false"]`), a `Conditions` entry
-    (`FooKeyEnabled: !Equals [!Ref EnableFooKey, "true"]`), and a `!If` entry
-    in `secrets[]`:
-    ```yaml
-    - !If
-      - FooKeyEnabled
-      - { Name: FOO_API_KEY, ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/bclaw/FOO_API_KEY" }
-      - !Ref AWS::NoValue
-    ```
-    When disabled, the entry resolves to `AWS::NoValue` and ECS ignores it, so
-    the task starts fine with no SSM parameter present. To enable it at deploy
-    time, pass `--parameter-overrides EnableFooKey=true` (after creating the
-    SSM parameter).
+  **Two exceptions** that CANNOT come from the plugin and need a `secrets[]`
+  entry (a stack parameter + condition + the entry) instead:
+  - **`GH_TOKEN_VAL`** (already wired) — the on-boot `gh auth login` runs in
+    the container `Command` before `exec hermes gateway`, i.e. before the
+    plugin loads, so it must be in the env at container start.
+  - **Any secret consumed by the container `Command` itself** (pre-Hermes) —
+    same reason. There are none today beyond `GH_TOKEN_VAL`.
 
-  The SSM parameter must exist before it's injected (create it via the AWS
-  console or `put-parameter`), and the execution role's `ssm:GetParameters`
-  grant already covers `parameter/bclaw/*` so no policy change is needed.
-  After the stack update, re-scale to 1 (see the DesiredCount pitfall above).
+  **Env-var blocklist caveat.** Hermes strips provider-credential names on its
+  `_HERMES_PROVIDER_ENV_BLOCKLIST` from subprocess (terminal / execute_code)
+  envs. For a key a *skill* uses, name it to avoid the blocklist (e.g.
+  `OPENROUTER_IMAGE_API_KEY`, not `OPENROUTER_API_KEY`) and declare it in the
+  skill's `required_environment_variables`.
 
 - **Validating template edits.** After editing `template.yaml`, the built-in
   PyYAML linter (in `patch`/`write_file`) reports false-positive errors on

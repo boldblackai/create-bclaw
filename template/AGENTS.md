@@ -54,12 +54,17 @@ You can use web-search-prime to look things up that aren't obvious in the reposi
   on NFS), which is the reason state is on EBS.
 - Secrets are **SSM SecureString** parameters under the claw's `/bclaw/KEY`
   namespace, written by the user in setup Phase 3 (piranesi pattern). Not
-  stack-owned, so they survive stack updates/deletes. 4 always-required params: `SLACK_BOT_TOKEN`,
-  `SLACK_APP_TOKEN`, `SLACK_ALLOWED_USERS`, `SLACK_HOME_CHANNEL`. Plus opt-in keys
-  chosen at deploy time: `GH_TOKEN_VAL` (optional, `EnableGitHubKey` — feeds the
-  on-boot `gh auth login --with-token` in the container `Command`; skipped when
-  disabled), and exactly one inference-provider key: `OPENROUTER_API_KEY`
-  (recommended), `ANTHROPIC_API_KEY`, or `ZAI_API_KEY`.
+  stack-owned, so they survive stack updates/deletes. A Hermes secret-source
+  plugin (`aws_ssm`, installed in setup Phase 5) resolves every `/bclaw/*`
+  parameter into the gateway env at startup, using the TaskRole's SSM-read
+  grant — so adding/rotating a key is an SSM write + restart, no redeploy. This
+  carries the Slack tokens (`SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`,
+  `SLACK_ALLOWED_USERS`, `SLACK_HOME_CHANNEL`) and the inference-provider key
+  (`OPENROUTER_API_KEY`/`ANTHROPIC_API_KEY`/`ZAI_API_KEY`). The ONE exception is
+  `GH_TOKEN_VAL` (optional, `EnableGitHubKey`): the on-boot `gh auth login` in
+  the container `Command` runs before Hermes starts, so it is still injected via
+  CloudFormation `secrets[]` (skipped when disabled). Requires harness >= 1.9.3
+  (#64189).
 - The task uses **host networking** (it shares the container instance's ENI,
   which has a public IP for outbound to Slack/ghcr/SSM — no NAT gateway). The
   security group is inbound-less.

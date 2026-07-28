@@ -32,10 +32,14 @@ Parameters:
 
   HarnessImageTag:
     Type: String
-    Default: hermes-1.9.1
+    Default: hermes-1.9.3
     Description: >
       Tag of the ghcr.io/boldblackai/harness image to run. Bump to upgrade
       the claw — no image rebuild (use the signed upstream image as-is).
+      hermes-1.9.3+ is REQUIRED for the aws_ssm secret-source plugin: it
+      backports Hermes #64189 (re-pull plugin secret sources after discovery),
+      without which the plugin registers but is not consulted at the first env
+      load (#64177) and the gateway never receives the SSM-resolved secrets.
 
   CpuArchitecture:
     Type: String
@@ -98,34 +102,6 @@ Parameters:
       is worth the loss of a multi-AZ placement hedge. The setup skill probes one ARM64-capable AZ via
       describe-instance-type-offerings and passes it here.
 
-  EnableOpenRouterKey:
-    Type: String
-    Default: "false"
-    AllowedValues: ["true", "false"]
-    Description: >
-      Set to "true" to inject /bclaw/OPENROUTER_API_KEY into the container env
-      (requires the SSM parameter to exist). Defaults to "false" — the setup
-      skill enables exactly one provider key at deploy time based on the
-      inference provider the user chose (OpenRouter recommended).
-
-  EnableZaiKey:
-    Type: String
-    Default: "false"
-    AllowedValues: ["true", "false"]
-    Description: >
-      Set to "true" to inject /bclaw/ZAI_API_KEY into the container env
-      (requires the SSM parameter to exist). Defaults to "false" so the
-      template works without a Z.AI key.
-
-  EnableAnthropicKey:
-    Type: String
-    Default: "false"
-    AllowedValues: ["true", "false"]
-    Description: >
-      Set to "true" to inject /bclaw/ANTHROPIC_API_KEY into the container env
-      (requires the SSM parameter to exist). Defaults to "false" so the
-      template works without an Anthropic key.
-
   EnableGitHubKey:
     Type: String
     Default: "false"
@@ -149,17 +125,16 @@ Parameters:
       0 and silently taking it down (aws cloudformation deploy applies the
       template Default to any parameter not in --parameter-overrides — it does
       NOT remember the prior stack's value). On a FIRST deploy the setup skill
-      passes DesiredCount=0: the SSM secrets don't exist yet, so starting at 1
-      would make ECS fail to fetch the unconditional Slack secrets and repeatedly
-      fail placement (crash-loop); it then scales to 1 once the secrets exist. On
-      updates the skill re-passes the live service's actual count. Teardown stops
-      the task directly via `aws ecs update-service --desired-count 0`, not via
-      this parameter.
+      passes DesiredCount=0: it defers the first boot until the SSM secrets are
+      written (Phase 3), so the gateway isn't running before its config is
+      staged. (The gateway tolerates a no-secrets boot — it logs "No messaging
+      platforms enabled" and stays RUNNING — but the Slack bot only connects
+      once the aws_ssm plugin is installed + its secrets block merged in Phase 5
+      + a restart.) Phase 4 then scales it to 1. On updates the skill re-passes
+      the live service's actual count. Teardown stops the task directly via
+      `aws ecs update-service --desired-count 0`, not via this parameter.
 
 Conditions:
-  OpenRouterKeyEnabled: !Equals [!Ref EnableOpenRouterKey, "true"]
-  ZaiKeyEnabled: !Equals [!Ref EnableZaiKey, "true"]
-  AnthropicKeyEnabled: !Equals [!Ref EnableAnthropicKey, "true"]
   GitHubKeyEnabled: !Equals [!Ref EnableGitHubKey, "true"]
 
 # ── Resources ───────────────────────────────────────────────────────────────
@@ -294,31 +269,38 @@ Resources:
   # They are not owned by this stack, so they survive stack deletes and stack
   # updates never clobber their values.
   #
-  # The task definition's `secrets[]` below references the SSM parameters by
-  # constructed ARN, and the execution role is granted ssm:GetParameters
-  # scoped to the claw's parameter prefix. DesiredCount is a parameter
-  # (default 1): on a FIRST deploy the skill passes DesiredCount=0 so the task
-  # doesn't start before the SSM parameters exist (it would crash-loop on the
-  # missing env vars), then scales to 1.
+  # Secrets live as SSM SecureString parameters under /bclaw/ (the piranesi
+  # pattern) and are NOT CloudFormation resources, so they survive stack
+  # updates/deletes. They reach the container two ways:
+  #
+  #   1. aws_ssm secret-source plugin (hermes-aws-ssm-secret-source) — resolves
+  #      EVERY /bclaw/* parameter into an env var at the first env load (after
+  #      .env, before Hermes reads credentials), using the TaskRole's
+  #      read-ssm-params grant. This carries the Slack tokens and the
+  #      inference-provider key(s). Adding or rotating a key is just an SSM
+  #      write + task restart — no template edit, no redeploy. The plugin is
+  #      installed during setup and its `secrets:` config block lives in
+  #      agent_home/config.yaml (merged into the live ~/.hermes/config.yaml by
+  #      the manage skill's Merge-config mode). Requires Hermes ≥ 1.9.3 (#64189).
+  #
+  #   2. CloudFormation secrets[] — used ONLY for GH_TOKEN_VAL, because the
+  #      on-boot `gh auth login --with-token` runs in the container Command
+  #      before `exec hermes gateway` (before the plugin loads). The execution
+  #      role's ssm:GetParameters grant (below) resolves it at container start.
   #
   # The claw is a Slack socket-mode bot (see README + slack-manifest.json).
-  # Always-required parameters (unconditional in secrets[]):
-  #   /bclaw/SLACK_BOT_TOKEN     — Slack bot OAuth token (xoxb-)
-  #   /bclaw/SLACK_APP_TOKEN     — Slack app-level token (xapp-, socket mode)
-  #   /bclaw/SLACK_ALLOWED_USERS — comma-separated Slack user IDs
-  #   /bclaw/SLACK_HOME_CHANNEL  — Slack home channel ID
-  # Opt-in GitHub key (inject /bclaw/GH_TOKEN_VAL only when EnableGitHubKey=true,
-  # chosen at deploy time — see the !If entry in secrets[] below):
-  #   /bclaw/GH_TOKEN_VAL        — GitHub PAT for on-boot `gh auth login` (see
-  #                                  the container Command below). Named
+  # SSM parameters under /bclaw/ (the plugin resolves all of them):
+  #   /bclaw/SLACK_BOT_TOKEN       — Slack bot OAuth token (xoxb-)
+  #   /bclaw/SLACK_APP_TOKEN       — Slack app-level token (xapp-, socket mode)
+  #   /bclaw/SLACK_ALLOWED_USERS   — comma-separated Slack user IDs
+  #   /bclaw/SLACK_HOME_CHANNEL    — Slack home channel ID
+  #   /bclaw/OPENROUTER_API_KEY    — OpenRouter API key (recommended)
+  #   /bclaw/ANTHROPIC_API_KEY     — Anthropic (direct Claude API)
+  #   /bclaw/ZAI_API_KEY           — Z.AI / Zhipu (GLM)
+  #   /bclaw/GH_TOKEN_VAL          — GitHub PAT for on-boot `gh auth login`
+  #                                  (see secrets[] + Command below; named
   #                                  *_VAL, not GH_TOKEN, to avoid colliding
-  #                                  with gh's reserved env var (which makes
-  #                                  `gh auth login` refuse to store).
-  # Opt-in inference-provider key (inject the ONE matching Enable*Key=true at
-  # deploy time — see the !If entries in secrets[] below):
-  #   /bclaw/OPENROUTER_API_KEY  — OpenRouter API key (recommended)
-  #   /bclaw/ANTHROPIC_API_KEY   — Anthropic (direct Claude API)
-  #   /bclaw/ZAI_API_KEY         — Z.AI / Zhipu (GLM)
+  #                                  with gh's reserved env var)
 
   # ── IAM: execution role (pull image, read SSM params, write logs) ─────────
 
@@ -381,6 +363,29 @@ Resources:
                   - ssmmessages:OpenControlChannel
                   - ssmmessages:OpenDataChannel
                 Resource: "*"
+        # SSM read access for the aws_ssm secret-source plugin
+        # (hermes-aws-ssm-secret-source). It runs in the container process and
+        # calls GetParametersByPath at startup to resolve the /bclaw/ namespace
+        # into env vars. Mirrors the ExecutionRole's read-ssm-params grant (ECS
+        # uses that one to resolve CloudFormation secrets[] at container start;
+        # the running container uses this one). WithDecryption is implied when
+        # the caller has kms:Decrypt on the claw's CMK.
+        - PolicyName: read-ssm-params
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameters
+                  - ssm:GetParameter
+                  - ssm:GetParametersByPath
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/bclaw/*"
+              - Effect: Allow
+                Action: kms:Decrypt
+                Resource: !GetAtt SsmKmsKey.Arn
+                Condition:
+                  StringEquals:
+                    "kms:ViaService": !Sub "ssm.${AWS::Region}.amazonaws.com"
 
   # ── IAM: container-instance role + instance profile ───────────────────────
   # The EC2 container instance (ASG-managed) needs:
@@ -689,6 +694,9 @@ Resources:
           Command:
             - sh
             - -c
+            # aws_ssm secrets resolve natively via the hermes-aws-ssm-secret-source
+            # plugin (Hermes #64189 — in the image since hermes-1.9.3 — re-pulls
+            # plugin secret sources after discovery). No builtin-source shim.
             - 'if [ -n "$GH_TOKEN_VAL" ]; then printf "%s" "$GH_TOKEN_VAL" | gh auth login --with-token 2>&1 || echo "[gh-auth] login failed (non-fatal)"; fi; exec hermes gateway'
           User: "1000:1000"
           Environment:
@@ -696,26 +704,18 @@ Resources:
             - { Name: HARNESS_CLOUD_MODE, Value: "1" }
             - { Name: HERMES_HOME, Value: "/home/harness/.hermes" }
             - { Name: HF_HOME, Value: "/home/harness/.hermes/.cache/huggingface" }
+          # Only GH_TOKEN_VAL is injected via CloudFormation secrets[]: the
+          # on-boot `gh auth login --with-token` runs in the container Command
+          # BEFORE `exec hermes gateway`, i.e. before the aws_ssm secret-source
+          # plugin (hermes-aws-ssm-secret-source) loads. Every other secret —
+          # the Slack tokens and the inference-provider keys — is resolved from
+          # the /bclaw/ SSM namespace by the plugin at the first env load
+          # (Hermes #64189, in the image since hermes-1.9.3), using the
+          # TaskRole's read-ssm-params grant. See agent_home/config.yaml.
           Secrets:
-            - { Name: SLACK_BOT_TOKEN,      ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/bclaw/SLACK_BOT_TOKEN" }
-            - { Name: SLACK_APP_TOKEN,      ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/bclaw/SLACK_APP_TOKEN" }
-            - { Name: SLACK_ALLOWED_USERS,  ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/bclaw/SLACK_ALLOWED_USERS" }
-            - { Name: SLACK_HOME_CHANNEL,   ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/bclaw/SLACK_HOME_CHANNEL" }
             - !If
               - GitHubKeyEnabled
               - { Name: GH_TOKEN_VAL, ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/bclaw/GH_TOKEN_VAL" }
-              - !Ref AWS::NoValue
-            - !If
-              - OpenRouterKeyEnabled
-              - { Name: OPENROUTER_API_KEY, ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/bclaw/OPENROUTER_API_KEY" }
-              - !Ref AWS::NoValue
-            - !If
-              - ZaiKeyEnabled
-              - { Name: ZAI_API_KEY, ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/bclaw/ZAI_API_KEY" }
-              - !Ref AWS::NoValue
-            - !If
-              - AnthropicKeyEnabled
-              - { Name: ANTHROPIC_API_KEY, ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/bclaw/ANTHROPIC_API_KEY" }
               - !Ref AWS::NoValue
           MountPoints:
             - { SourceVolume: hermes-data,       ContainerPath: /home/harness/.hermes,           ReadOnly: false }
@@ -812,12 +812,13 @@ Outputs:
   SsmParameterPrefix:
     Value: "/bclaw"
     Description: >
-      SSM SecureString parameter namespace for this claw. The 4
-      always-required params live here: SLACK_BOT_TOKEN, SLACK_APP_TOKEN,
-      SLACK_ALLOWED_USERS, SLACK_HOME_CHANNEL. Plus opt-in keys selected via
-      the Enable*Key stack parameters: GH_TOKEN_VAL (EnableGitHubKey) and
-      exactly one inference-provider key (OPENROUTER_API_KEY,
-      ANTHROPIC_API_KEY, or ZAI_API_KEY).
+      SSM SecureString parameter namespace for this claw. The aws_ssm
+      secret-source plugin resolves every /bclaw/* parameter into an env var
+      at the first gateway start: the 4 Slack params (SLACK_BOT_TOKEN,
+      SLACK_APP_TOKEN, SLACK_ALLOWED_USERS, SLACK_HOME_CHANNEL), the chosen
+      inference-provider key (OPENROUTER_API_KEY, ANTHROPIC_API_KEY, or
+      ZAI_API_KEY), and GH_TOKEN_VAL (which is ALSO injected via secrets[] for
+      the on-boot gh-auth that runs before Hermes starts).
   KmsKeyArn:
     Value: !GetAtt SsmKmsKey.Arn
     Description: >

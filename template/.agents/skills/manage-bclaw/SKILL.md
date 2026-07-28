@@ -1,50 +1,55 @@
 ---
 name: manage-bclaw
 description: >
-  Manage a running ECS (EC2 launch type) bclaw. Four modes: (1) Overlay — push the
-  repo's agent_home/ onto the bclaw's ~/.hermes (EBS-backed) to update config,
+  Manage a running ECS (EC2 launch type) bclaw. Five modes: (1) Overlay — push the
+  repo's agent_home/ onto the bclaw's ~/.hermes (EBS-backed) to update
   skills, memories, system prompt, or personas without a redeploy (via ECS
   Exec); (2) Run — execute arbitrary commands on the live bclaw for inspection,
-  debugging, or one-off operations (via ECS Exec); (3) Upgrade image — roll
+  debugging, or one-off operations (via ECS Exec); (3) Merge-config — key-level merge of agent_home/config.yaml into live config.yaml; (4) Upgrade image — roll
   the running bclaw onto a new ghcr.io/boldblackai/harness tag by bumping the
   HarnessImageTag stack parameter and redeploying (no image rebuild);
-  (4) Host — retrieve a stuck container instance's console output or force a
+  (5) Host — retrieve a stuck container instance's console output or force a
   wedged instance to replace itself, scoped to the claw's instances via
   aws:ResourceTag/ClawName. Companion to setup-bclaw / teardown-bclaw.
 ---
 
 # Manage Harness ECS on EC2
 
-Manage a live ECS (EC2 launch type) claw. This skill handles four related tasks:
+Manage a live ECS (EC2 launch type) claw. This skill handles five related tasks:
 
 1. **Overlay** (default) — push the repo's `agent_home/` onto the claw's
-   `~/.hermes` to update curated state (config, skills, memories, prompts,
+   `~/.hermes` to update curated state (skills, memories, prompts,
    personas) without a CloudFormation redeploy or image rebuild. Transferred
-   over ECS Exec (SSM Session Manager).
+   over ECS Exec (SSM Session Manager). **`config.yaml` is excluded** from the overlay — use Mode 3 (Merge-config) for it.
 2. **Run** — execute arbitrary commands on the live claw: inspect files,
    check process state, run diagnostics, or perform one-off operations like
    deleting a file that was removed from `agent_home/`. Also over ECS Exec.
-3. **Upgrade image** — roll the running claw onto a new
+3. **Merge-config** — deep-merge the repo's `agent_home/config.yaml` onto the
+   live `~/.hermes/config.yaml` at the **key** level (local curated values win on
+   overlap; the live config's comments, order, and env-driven keys are
+   preserved), surface conflicts + mtimes for confirmation, and push the
+   combination back over ECS Exec. Needs Python via `uv`.
+4. **Upgrade image** — roll the running claw onto a new
    `ghcr.io/boldblackai/harness` tag by bumping the `HarnessImageTag` stack
    parameter and redeploying. No image rebuild (the signed upstream image is
    used as-is); ECS performs a recreate deployment (stop-old-then-start-new —
    the claw is single-replica and binds the Slack socket, so two tasks can't
    coexist; ~10-20s downtime during the swap). This is a CloudFormation
    stack update, not an ECS Exec operation.
-4. **Host** — operate on the underlying EC2 **container instance** rather than
+5. **Host** — operate on the underlying EC2 **container instance** rather than
    the running task: retrieve its console output (boot/UserData log) when it
    fails to register to ECS, or terminate a wedged instance to force the ASG
    to launch a successor that reattaches the EBS volume. These actions are
    scoped to the claw's own instances via `aws:ResourceTag/ClawName`. They are
    the path when there is no running task to ECS Exec into.
 
-Modes 1 and 2 share the same prerequisites and ECS Exec transport (the
-"Shared first step" below). Mode 3 needs the same shell state and a RUNNING
-service but does not use the exec session. Mode 4 needs only the shell state
+Modes 1, 2, and 3 share the same prerequisites and ECS Exec transport (the
+"Shared first step" below). Mode 4 needs the same shell state and a RUNNING
+service but does not use the exec session. Mode 5 needs only the shell state
 (mise + AWS creds) and operates on the EC2 instance, not the task,
 so it works even when no task is RUNNING. Determine which mode the user
 needs from context, or ask. When in doubt, default to **Overlay** (the
-common case).
+common case); for `config.yaml` changes, default to **Merge-config**.
 
 ## Prerequisites
 
@@ -187,7 +192,7 @@ in a final call. No S3 bucket, no GitHub dependency, no image rebuild.
 
 | Repo path | Lands at |
 |---|---|
-| `agent_home/config.yaml` | `/home/harness/.hermes/config.yaml` |
+| `agent_home/config.yaml` | `/home/harness/.hermes/config.yaml` *(via Mode 3 Merge-config, NOT overlay)* |
 | `agent_home/system-prompt.md` | `/home/harness/.hermes/system-prompt.md` |
 | `agent_home/skills/foo/SKILL.md` | `/home/harness/.hermes/skills/foo/SKILL.md` |
 | `agent_home/memories/...` | `/home/harness/.hermes/memories/...` |
@@ -219,12 +224,15 @@ local caches, editor cruft):
     --exclude='.git' --exclude='.DS_Store' --exclude='__pycache__' \
     --exclude='*.pyc' --exclude='.cache' \
     --exclude='AGENTHOME.md' \
+    --exclude='config.yaml' \
     . ) \
   && ls -lh /tmp/agent_home.tar.gz
 ```
 
 `AGENTHOME.md` (repo-level docs about the `agent_home/` directory itself) is
-excluded so it doesn't land on the claw.
+excluded so it doesn't land on the claw. `config.yaml` is excluded too — it is
+handled by Mode 3 (Merge-config), not the file-level overlay; if you have one
+staged in `agent_home/`, the overlay silently skips it (run Mode 3 to apply it).
 
 Base64-encode it (single line, no wrapping) and measure:
 
@@ -253,21 +261,23 @@ List the files in the payload:
 tar tzf /tmp/agent_home.tar.gz | sort
 ```
 
-For the few files that matter most (e.g. `config.yaml`, `system-prompt.md`),
+For the few files that matter most (e.g. `system-prompt.md`, a skill's `SKILL.md`),
 diff against the claw's current copy (one exec round-trip each — do only for the
 handful worth checking):
 
 ```bash
-# Example: diff config.yaml against the live claw
+# Example: diff system-prompt.md against the live claw
 aws ecs execute-command --cluster "$CLAW_NAME" --task "$TASK_ARN" \
   --container hermes --interactive \
-  --command "sh -c 'cat /home/harness/.hermes/config.yaml 2>/dev/null || echo ABSENT'" \
+  --command "sh -c 'cat /home/harness/.hermes/system-prompt.md 2>/dev/null || echo ABSENT'" \
   --region "$AWS_REGION" 2>/dev/null | sed 's/\r$//' > /tmp/claw_config.current
-diff -u /tmp/claw_config.current /workspace/agent_home/config.yaml || true
+diff -u /tmp/claw_file.current /workspace/agent_home/system-prompt.md || true
 ```
 
 > The `sed 's/\r$//'` strips the carriage returns the exec PTY appends to each
-> line so the diff is clean. Apply the same filter when diffing any remote file.
+> line so the diff is clean. Apply the same filter when diffing any remote file. `config.yaml` is not in the
+overlay (excluded — see Phase 1); use Mode 3 (Merge-config) to see and apply
+`config.yaml` changes.
 
 **Gate:** use `ask_user_question` to confirm the user wants to apply the overlay
 (show the file list + any notable diffs). This overwrites live files — get
@@ -355,7 +365,7 @@ Spot-check that the files landed with the right ownership (should be
 ```bash
 aws ecs execute-command --cluster "$CLAW_NAME" --task "$TASK_ARN" \
   --container hermes --interactive \
-  --command "sh -c 'stat -c \"%U:%G %n\" /home/harness/.hermes/config.yaml 2>/dev/null; find /home/harness/.hermes/skills -maxdepth 2 -type f 2>/dev/null | head -20'" \
+  --command "sh -c 'stat -c \"%U:%G %n\" /home/harness/.hermes/system-prompt.md 2>/dev/null; find /home/harness/.hermes/skills -maxdepth 2 -type f 2>/dev/null | head -20'" \
   --region "$AWS_REGION"
 ```
 
@@ -363,8 +373,8 @@ aws ecs execute-command --cluster "$CLAW_NAME" --task "$TASK_ARN" \
 
 - **Skills, memories, personas** → usually **no restart**. Hermes loads these
   dynamically per turn in most configurations.
-- **`config.yaml`** → **restart recommended** if you changed model, provider,
-  toolsets, MCP servers, or gateway behavior (read at startup).
+- **`config.yaml`** → not changed by overlay (excluded); apply it via Mode 3
+  (Merge-config), which recommends its own restart.
 - **MCP server config, plugins** → **restart required** (loaded at boot).
 - **`system-prompt.md`** → restart recommended (compiled at startup).
 
@@ -484,18 +494,209 @@ pipe through `sed 's/\r$//'`.
 
 ---
 
-## Mode 3: Upgrade the running image
+## Mode 3: Merge-config — merge agent_home/config.yaml into the live config
+
+Apply the repo's curated `agent_home/config.yaml` onto the claw's live
+`~/.hermes/config.yaml` at the **key** level — a deep merge, not a file
+overwrite. The live config is the base; local curated values win on overlap;
+the live config's comments, key order, and env-driven keys are all preserved.
+This is the config-aware replacement for blindly overlaying `config.yaml`
+(Mode 1 excludes it on purpose). Use this whenever you want to change
+`config.yaml`.
+
+The merge is driven by `merge_config.py` (alongside this skill), run with `uv`
+so it pulls `ruamel.yaml` (comment/order-preserving round-trip) without touching
+the system Python. `uv` comes from `mise.toml`, so activate mise first:
+
+```bash
+eval "$(/usr/local/bin/mise activate bash)"
+```
+
+**Gate: shared first step (connect) passed; `agent_home/config.yaml` exists.**
+
+### Step 1: Fetch the live config.yaml + its mtime
+
+Read the live `~/.hermes/config.yaml` and its mtime over ECS Exec. The file is
+read in **byte-chunked base64** (<=1500 B/chunk, each chunk's decoded length
+verified and retried) rather than a single `cat | base64`: ECS Exec stdout
+truncates at roughly 4-5 KB of base64 in one shot, and a real `config.yaml`
+(~10-12 KB) exceeds that ceiling, so a single-shot capture silently loses the
+tail and produces invalid YAML. Chunking stays under the limit; per-chunk
+verify + retry catches the occasional partial read. This mirrors the
+chunked-append PUT the overlay (Mode 1 Phase 3) uses successfully.
+
+First capture the byte size + mtime in one round-trip. The markers isolate
+the numbers from the exec PTY's `SessionId` (which itself contains digits, so
+`tr -dc '0-9'` is unsafe — it merges them with the real value):
+
+```bash
+CFG=/home/harness/.hermes/config.yaml
+META=$(aws ecs execute-command --cluster "$CLAW_NAME" --task "$TASK_ARN" \
+  --container hermes --interactive \
+  --command "sh -c 'echo NBEG\$(wc -c < $CFG 2>/dev/null)NEND MBEG\$(stat -c %Y $CFG 2>/dev/null)MEND'" \
+  --region "$AWS_REGION" 2>/dev/null)
+SIZE=$(printf '%s' "$META" | grep -o 'NBEG[0-9]*NEND' | grep -oE '[0-9]+' || true)
+REMOTE_MTIME=$(printf '%s' "$META" | grep -o 'MBEG[0-9]*MEND' | grep -oE '[0-9]+' || true)
+echo "live config: ${SIZE:-0} bytes, mtime=${REMOTE_MTIME:-none}"
+```
+
+If `SIZE` is empty/0 the live `config.yaml` is absent — `/tmp/claw_config.current`
+stays empty and `REMOTE_MTIME` is unset; the merge helper then treats an
+absent remote as "nothing to merge onto" and the result is just the local
+config. Otherwise read it in verified base64 chunks:
+
+```bash
+: > /tmp/claw_config.current
+if [ -n "$SIZE" ] && [ "$SIZE" -gt 0 ]; then
+  BS=1500
+  NCHUNKS=$(( (SIZE + BS - 1) / BS ))
+  c=0
+  while [ "$c" -lt "$NCHUNKS" ]; do
+    exp=$BS; [ $(( (c + 1) * BS )) -gt "$SIZE" ] && exp=$((SIZE - c * BS))
+    b64=""
+    for attempt in 1 2 3 4 5; do
+      b64=$(aws ecs execute-command --cluster "$CLAW_NAME" --task "$TASK_ARN" \
+            --container hermes --interactive \
+            --command "sh -c 'dd if=$CFG bs=$BS skip=$c count=1 2>/dev/null | base64'" \
+            --region "$AWS_REGION" 2>/dev/null \
+            | sed 's/\r$//; s/Cannot perform start session: EOF//' \
+            | grep -E '^[A-Za-z0-9+/=]+$')
+      # accept this chunk only if its decoded length matches the expected size
+      dec=$(printf '%s' "$b64" | base64 -d 2>/dev/null | wc -c)
+      [ "$dec" = "$exp" ] && break
+      echo "  chunk $((c+1))/$NCHUNKS: got $dec bytes (want $exp), retry $attempt/5"
+      b64=""
+    done
+    [ -z "$b64" ] && { echo "  chunk $((c+1))/$NCHUNKS FAILED after retries — re-run Step 1"; exit 1; }
+    printf '%s' "$b64" | base64 -d >> /tmp/claw_config.current
+    echo "  chunk $((c+1))/$NCHUNKS ok ($dec bytes)"
+    c=$((c + 1))
+  done
+fi
+
+# sanity: assembled length must match the reported size before merging
+GOT=$(wc -c < /tmp/claw_config.current)
+[ "$GOT" = "$SIZE" ] || { echo "LENGTH MISMATCH: assembled $GOT vs reported $SIZE — re-run Step 1"; exit 1; }
+```
+
+The `sed` strips the exec PTY's glued-on `Cannot perform start session: EOF`
+boilerplate and carriage returns; the `grep -E '^[A-Za-z0-9+/=]+$'` keeps only
+base64 lines (dropping the `Session Manager` / `Starting session` lines).
+
+### Step 2: Run the merge
+
+```bash
+uv run --no-project --with 'ruamel.yaml' python3 \
+  .agents/skills/manage-bclaw/merge_config.py \
+  --local /workspace/agent_home/config.yaml \
+  --remote /tmp/claw_config.current \
+  --remote-mtime "${REMOTE_MTIME:-0}" \
+  --out /tmp/config.merged.yaml
+```
+
+Read the report it prints:
+
+- **`added`** — local-only keys, applied (additive, safe).
+- **`overridden`** — leaf differs and the local file is at least as new as the
+  live file; local applied, **not** flagged (the curated edit is the newer intent).
+- **`FLAGGED … confirm before applying`** — staged as local-wins but needs your
+  sign-off:
+  - `override_remote_newer` — the live `config.yaml` was modified *after* the
+    local edit, so this override might revert an intentional remote change.
+  - `override_unreliable_mtime` — mtimes are missing or the remote clock looks
+    skewed, so "who's newer" can't be trusted.
+  - `type_mismatch` — the same path is a mapping on one side and a scalar on the
+    other (e.g. you turned `feature_flags: true` into a block).
+- **`kept_remote`** — paths you passed via `--keep-remote`; remote value kept.
+- **`NEEDS_CONFIRM: yes|no`** — `yes` iff anything is flagged.
+
+### Step 3: Resolve flagged conflicts (ask if not sure)
+
+If `NEEDS_CONFIRM: yes`, surface the flagged items with `ask_user_question`
+(show each path with its remote → local value). The merged file already stages
+local-wins, so the two resolutions are:
+
+- **Apply curated (local) values** → proceed to Step 4 as-is.
+- **Keep the remote value for a key** → re-run Step 2 adding
+  `--keep-remote <dotted.path>` (repeatable; works on a leaf or a whole
+  subtree, e.g. `--keep-remote model` or `--keep-remote secrets.bitwarden`),
+  then proceed.
+
+If `NEEDS_CONFIRM: no`, skip to Step 4.
+
+### Step 4: Show the diff and confirm
+
+```bash
+diff -u /tmp/claw_config.current /tmp/config.merged.yaml || true
+```
+
+Use `ask_user_question` to confirm the user wants to push this merged
+`config.yaml` (showing the diff). This overwrites the live config — get explicit
+confirmation before Step 5.
+
+### Step 5: Push the merged config + fix ownership
+
+`config.yaml` is tiny, so a single exec round-trip (no chunking) base64-pushes
+it. The exec session runs as **root**, so `chown 1000:1000` after the write:
+
+```bash
+B64=$(base64 -w0 /tmp/config.merged.yaml)
+aws ecs execute-command --cluster "$CLAW_NAME" --task "$TASK_ARN" \
+  --container hermes --interactive \
+  --command "sh -c 'printf %s ${B64} | base64 -d > /home/harness/.hermes/config.yaml && chown 1000:1000 /home/harness/.hermes/config.yaml && echo CONFIG_MERGED'" \
+  --region "$AWS_REGION"
+```
+
+Look for `CONFIG_MERGED`. (If it complains the command is too long, the file got
+unusually large — split the base64 and chunk it like Mode 1 Phase 3.)
+
+### Step 6: Restart decision
+
+`config.yaml` is read at startup (model, provider, toolsets, MCP, gateway
+behavior), so **restart recommended**. Cloud mode re-seeds the env-driven keys
+on restart — that's fine: the merged file already carries the live (re-seeded)
+values for those, and your curated non-env keys (e.g. the `secrets:` block)
+persist through the re-seed.
+
+```bash
+aws ecs update-service --cluster "$CLAW_NAME" --service "$CLAW_NAME" \
+  --force-new-deployment --region "$AWS_REGION"
+aws ecs wait tasks-running --cluster "$CLAW_NAME" \
+  --tasks "$(aws ecs list-tasks --cluster "$CLAW_NAME" --region "$AWS_REGION" \
+    --query 'taskArns[0]' --output text)" \
+  --region "$AWS_REGION"
+```
+
+Use `ask_user_question` to ask whether to restart now.
+
+### Notes
+
+- **Comments are preserved.** `merge_config.py` loads the live config with
+  ruamel.yaml round-trip mode, so comments and key order survive on every key
+  you don't touch. (Comments inside a key you override are replaced by the local
+  value, as expected.)
+- **No deletes.** The merge never removes a key — local only adds/overrides.
+  To remove a key, use Mode 2 (Run) to edit the live config explicitly.
+- **`secrets:` is the canonical use case.** Adding a secret source (e.g. the
+  `aws_ssm` block) is a non-env, local-only key — it lands cleanly via this mode
+  and survives the cloud-mode re-seed on restart.
+- **Idempotent.** Re-running with an unchanged local + the freshly-merged live
+  config reports no diffs (`NEEDS_CONFIRM: no`, empty report).
+
+---
+
+## Mode 4: Upgrade the running image
 
 Roll the running claw onto a new `ghcr.io/boldblackai/harness` tag. The image
-tag is a CloudFormation parameter (`HarnessImageTag`, default e.g.
-`hermes-1.9.1`); bumping it and redeploying creates a new task-definition
+tag is a CloudFormation parameter (`HarnessImageTag`, default
+`hermes-1.9.3`); bumping it and redeploying creates a new task-definition
 revision and ECS rolls the task — **no image rebuild** (the signed upstream
 image is used as-is). EBS-backed state (sessions, memories, `~/.config/gh`)
 survives the roll; only the container image changes.
 
 **Gate: shell state active (mise + AWS creds); `CLAW_NAME` +
 `AWS_REGION` collected and the service is `RUNNING` (shared first step, up to
-the RUNNING check).** Mode 3 is a CloudFormation stack update — it does not
+the RUNNING check).** Mode 4 is a CloudFormation stack update — it does not
 need the ECS Exec session, the Session Manager plugin, or `TASK_ARN`.
 
 ### Step 1: Capture the current tag and choose the target
@@ -508,7 +709,7 @@ aws ecs describe-tasks --cluster "$CLAW_NAME" \
     --query 'taskArns[0]' --output text)" \
   --region "$AWS_REGION" \
   --query 'tasks[0].containers[0].image' --output text
-# → ghcr.io/boldblackai/harness:hermes-1.9.1
+# → ghcr.io/boldblackai/harness:hermes-1.9.3
 ```
 
 And what the stack is parameterized with:
@@ -537,9 +738,11 @@ before proceeding.
 `cloudformation deploy` applies the template `Default` to every parameter
 omitted from `--parameter-overrides` — it does **not** remember the prior
 stack's values. Several of this stack's parameters default to `false` /
-placeholder AZs, so omitting them silently reverts: the provider key drops
-(gateway comes up with no model), GitHub auth turns off, the AZs revert to
-placeholders.
+placeholder AZs, so omitting them silently reverts: GitHub auth turns off
+(`EnableGitHubKey` defaults to `false`) and the AZ reverts to a placeholder.
+(The inference-provider key is resolved from SSM by the aws_ssm plugin, not a
+stack parameter, so it is unaffected by an upgrade.) Capture and re-pass
+`EnableGitHubKey`, `AZ1`, and `DesiredCount`.
 
 Capture every current parameter as `Key=Value` (excluding `HarnessImageTag`,
 which we're changing) into a reusable list:
@@ -566,7 +769,7 @@ version bump is just this edit plus the redeploy in Step 4, then commit:
 # .agents/skills/setup-bclaw/template.yaml
 HarnessImageTag:
   Type: String
-  Default: hermes-1.9.2     # ← was hermes-1.9.1
+  Default: hermes-1.9.4     # ← was hermes-1.9.3
 ```
 
 > To roll without touching the repo, skip this edit and add
@@ -584,7 +787,7 @@ aws cloudformation deploy \
   --capabilities CAPABILITY_NAMED_IAM \
   --role-arn arn:aws:iam::$(aws sts get-caller-identity \
     --query 'Account' --output text):role/${CLAW_NAME}-cfn-exec \
-  --parameter-overrides $OVERRIDES HarnessImageTag=hermes-1.9.2
+  --parameter-overrides $OVERRIDES HarnessImageTag=hermes-1.9.4
 ```
 
 > If you edited the `Default` in Step 3, passing `HarnessImageTag` here is
@@ -621,7 +824,7 @@ aws ecs describe-tasks --cluster "$CLAW_NAME" --tasks "$TASK_ARN" \
   --output table
 ```
 
-Expect `Image` ending in `:hermes-1.9.2`, `Status = RUNNING`. Tail the gateway
+Expect `Image` ending in `:hermes-1.9.4`, `Status = RUNNING`. Tail the gateway
 log to confirm the bot reconnected:
 
 ```bash
@@ -635,12 +838,12 @@ If the new image is bad, re-run this mode with the previous tag
 
 ---
 
-## Mode 4: Debug or force-replace the container instance
+## Mode 5: Debug or force-replace the container instance
 
 Operate on the underlying **EC2 container instance** (the host) rather than the
 running ECS task. Use this when the instance itself is the problem — it failed
 to register to ECS, it is wedged but passing health checks, or you need its boot
-log. Modes 1–3 all assume a RUNNING task to ECS Exec into; Mode 4 is the path
+log. Modes 1–4 all assume a RUNNING task to ECS Exec into; Mode 5 is the path
 when there is no task (or the task is not the issue).
 
 Both actions are scoped by the `bclaw-deploy` policy's `EC2InstanceOps`
@@ -761,11 +964,14 @@ aws ec2 terminate-instances --instance-ids "$INSTANCE_ID" --dry-run --region "$A
 
 - **`config.yaml` caveat (cloud mode).** In cloud mode
   (`HARNESS_CLOUD_MODE=1`, set by the task definition), the boot entrypoint
-  reconciles `config.yaml` from environment variables on every boot. If you
-  overlay a hand-edited `config.yaml`, a subsequent task restart may re-seed
-  parts of it from env. Overlay `config.yaml` only for keys that are **not**
-  env-driven (e.g. skills, toolsets, MCP servers, model overrides). For
-  env-driven keys (API keys, Slack config), update the SSM parameters instead
+  reconciles `config.yaml` from environment variables on every boot: it re-seeds
+  the **env-driven** keys (model, provider, API keys, Slack config) but leaves
+  non-env keys (skills, toolsets, MCP, the `secrets:` block) as written. The
+  overlay therefore **excludes** `config.yaml` — a file-level overwrite would
+  discard non-env keys the re-seed doesn't restore. Apply `config.yaml` with
+  **Mode 3 (Merge-config)**, which merges at the key level (preserving comments
+  and order) and stages non-env curated keys without touching the re-seeded
+  ones. For env-driven keys, update the SSM parameters instead
   (see the setup skill's Phase 3 / Phase 5a token-rotation recipe).
 
 - **Idempotent.** Running the overlay mode twice with the same `agent_home/` is a
@@ -785,20 +991,22 @@ aws ec2 terminate-instances --instance-ids "$INSTANCE_ID" --dry-run --region "$A
 
 - **Companion skills.** `setup-bclaw` (create the claw),
   `teardown-bclaw` (destroy it). This skill sits between them:
-  Modes 1 (Overlay) and 2 (Run) mutate or inspect the live claw without
-  touching the CloudFormation stack or task definition; Mode 3 (Upgrade image)
+  Modes 1 (Overlay), 2 (Run), and 3 (Merge-config) mutate or inspect the live claw over ECS Exec without
+  touching the CloudFormation stack or task definition; Mode 4 (Upgrade image)
   performs an in-place stack update that re-renders the task definition and
-  triggers an ECS recreate deployment; Mode 4 (Host) operates on the EC2
+  triggers an ECS recreate deployment; Mode 5 (Host) operates on the EC2
   container instance directly, independent of the task or stack.
 
-- **Image upgrades are stack updates, not overlays.** Mode 3 bumps
-  `HarnessImageTag` (a CloudFormation parameter, default e.g. `hermes-1.9.1`)
+- **Image upgrades are stack updates, not overlays.** Mode 4 bumps
+  `HarnessImageTag` (a CloudFormation parameter, default `hermes-1.9.3`)
   and redeploys, creating a new task-definition revision; ECS recreates the
   task (stop-old-then-start-new).
   It does not touch EBS state — sessions, memories, and `~/.config/gh` survive.
   Persist the new tag by editing the `Default` in the repo's `template.yaml`
   (commit it like any version bump), or pass it as a one-off
   `--parameter-overrides` value. On any stack update you MUST re-pass every
-  non-default parameter (provider key, `EnableGitHubKey`, AZs, `DesiredCount`)
-  — `cloudformation deploy` applies template defaults to omitted ones, so
-  forgetting `EnableOpenRouterKey=true` silently drops the model key.
+  non-default parameter (`EnableGitHubKey`, `AZ1`, `DesiredCount`) —
+  `cloudformation deploy` applies template defaults to omitted ones, so
+  forgetting `EnableGitHubKey=true` silently turns GitHub auth back off. (The
+  inference-provider key is resolved from SSM by the aws_ssm plugin, not a
+  stack parameter, so it is unaffected by an upgrade.)

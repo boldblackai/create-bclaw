@@ -1,0 +1,14 @@
+# aws_ssm secret source for Hermes. Pushed into the live ~/.hermes/config.yaml
+# by the manage-bclaw skill's Merge-config mode (run once during setup); the
+# overlay excludes config.yaml on purpose. The aws_ssm plugin
+# (hermes-aws-ssm-secret-source, installed during setup) resolves the /bclaw/
+# namespace into env vars at the first gateway start, using the TaskRole's
+# read-ssm-params grant. Requires Hermes >= 1.9.3 (#64189).
+secrets:
+  sources: [aws_ssm]        # ordered; bulk sources yield to mapped ones
+  aws_ssm:
+    enabled: true
+    path: /bclaw/           # the claw's SSM namespace
+    region: ""              # empty = botocore default chain (AWS_REGION / profile / task role)
+    recursive: true
+    override_existing: true # rotate centrally without a .env edit

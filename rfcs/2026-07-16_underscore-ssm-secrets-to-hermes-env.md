@@ -1,7 +1,18 @@
 # On-boot materialization of `_`-prefixed SSM secrets into `$HERMES_HOME/.env`
 
 **Date:** 2026-07-16
-**Status:** Proposed
+**Status:** Rejected
+
+> **Rejected** in favor of the `aws_ssm` Hermes secret-source plugin
+> ([boldblackai/hermes-aws-ssm-secret-source](https://github.com/boldblackai/hermes-aws-ssm-secret-source)),
+> proven live on a deployed claw (integration journal on the corkboard:
+> `journal:2026-07-28_aws-ssm-secret-source`) and tracked in
+> [create-bclaw#27](https://github.com/boldblackai/create-bclaw/issues/27).
+> That approach resolves every `/bclaw/*` secret natively at Hermes' first env
+> load — no boot script, no in-image `aws` CLI dependency, and no `.env`
+> write/clobber collision with `hermes config` — so the `_`-prefix convention
+> and its task-role-grant + boot-materialization machinery are unnecessary.
+> The plugin requires Hermes >= 1.9.3 (#64189).
 
 ## Goal
 
