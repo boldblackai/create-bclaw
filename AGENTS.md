@@ -4,6 +4,7 @@
 
 - Use a TDD workflow when writing code.
 - Always redact AWS identifiers (account IDs, resource ARNs, instance IDs, etc.) in RFCs, PRs, PR comments, commit messages, and any other text checked into the repository. Use placeholders like `<account-id>`, `<resource-id>`, or a descriptive label instead.
+- Never put links to the corkboard in code or commit messages (or any other text checked into the repository). The corkboard is a low-security, internal resource; reference it by name ("the corkboard") instead of embedding its URL.
 
 ## RFCs
 
@@ -111,16 +112,16 @@ is scoped to what a generated cluster inherits from `template/`.
 
 #### Integration cycle journal Format
 
-To aid in porting back changes, keep a journal of issues we encountered during an integration cycle in `/workspace/references/integrations/YYYY-MM-DD_short_title.md` in journal-style append-only format.
+To aid in porting back changes, keep a journal of issues we encountered during an integration cycle. The journal lives in the `journal:create-bclaw:` namespace on the **corkboard** (DokuWiki), as a page like `journal:create-bclaw:YYYY-MM-DD_short_title`, authored in DokuWiki syntax — Markdown renders as literal text, so use wiki markup (see the corkboard skill) — in journal-style append-only format:
 
-- `# Title` — short descriptive title
-- `**Date:**` — ate (ISO format)
+- `====== Title ======` — short descriptive title (page H1)
+- `**Date:**` — date (ISO format)
 - `**Status:**` — `In Progress`, `Done`
-- `## Entries` — List of entries
+- `===== Entries =====` — list of entries (H2)
 
-ONLY add issues, do not talk about plans or implementation details (the rfc is for that, just link to it)
+ONLY add issues, do not talk about plans or implementation details (the rfc is for that, just link to it).
 
-Once the port-back is complete and the golden test passes, **delete the journal** — it served its purpose and retaining stale journals adds noise.
+Once the port-back is complete and the golden test passes, **set the journal's status to `Done` and leave it in place** — it now lives permanently in the `journal:create-bclaw:` namespace as a record of the cycle, so do not delete it.
 
 ## Tool Versions
 
