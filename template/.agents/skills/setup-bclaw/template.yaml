@@ -274,14 +274,18 @@ Resources:
   # updates/deletes. They reach the container two ways:
   #
   #   1. aws_ssm secret-source plugin (hermes-aws-ssm-secret-source) — resolves
-  #      EVERY /bclaw/* parameter into an env var at the first env load (after
-  #      .env, before Hermes reads credentials), using the TaskRole's
-  #      read-ssm-params grant. This carries the Slack tokens and the
-  #      inference-provider key(s). Adding or rotating a key is just an SSM
-  #      write + task restart — no template edit, no redeploy. The plugin is
-  #      installed during setup and its `secrets:` config block lives in
-  #      agent_home/config.yaml (merged into the live ~/.hermes/config.yaml by
-  #      the manage skill's Merge-config mode). Requires Hermes ≥ 1.9.3 (#64189).
+  #      the /bclaw/* params explicitly mapped in agent_home/config.yaml
+  #      `env:` into env vars at the first env load (after .env, before Hermes
+  #      reads credentials), using the TaskRole's read-ssm-params grant. The
+  #      plugin is mapped-only: only listed params are fetched and only
+  #      SecureString params are accepted (missing/non-SecureString warn+skip,
+  #      non-fatal). This carries the Slack tokens and the inference-provider
+  #      key(s). Adding a new key is an SSM write + an `env:` entry + a task
+  #      restart; rotating is just an SSM write + restart — no template edit,
+  #      no redeploy. The plugin is installed during setup and its `secrets:`
+  #      config block lives in agent_home/config.yaml (merged into the live
+  #      ~/.hermes/config.yaml by the manage skill's Merge-config mode).
+  #      Requires Hermes ≥ 1.9.3 (#64189).
   #
   #   2. CloudFormation secrets[] — used ONLY for GH_TOKEN_VAL, because the
   #      on-boot `gh auth login --with-token` runs in the container Command
@@ -289,7 +293,7 @@ Resources:
   #      role's ssm:GetParameters grant (below) resolves it at container start.
   #
   # The claw is a Slack socket-mode bot (see README + slack-manifest.json).
-  # SSM parameters under /bclaw/ (the plugin resolves all of them):
+  # SSM parameters under /bclaw/ (the plugin resolves those mapped in `env:`):
   #   /bclaw/SLACK_BOT_TOKEN       — Slack bot OAuth token (xoxb-)
   #   /bclaw/SLACK_APP_TOKEN       — Slack app-level token (xapp-, socket mode)
   #   /bclaw/SLACK_ALLOWED_USERS   — comma-separated Slack user IDs
@@ -322,22 +326,24 @@ Resources:
             Version: "2012-10-17"
             Statement:
               - Effect: Allow
-                Action:
-                  - ssm:GetParameters
-                  - ssm:GetParameter
-                # Scoped to the claw's SSM parameter prefix. WithDecryption
-                # is implied by GetParameters when the caller has kms:Decrypt.
+                # ECS resolves CloudFormation secrets[] (GH_TOKEN_VAL) with
+                # GetParameters (batch). Scoped to the claw's SSM parameter
+                # prefix; WithDecryption is server-side, gated by kms:Decrypt.
+                Action: ssm:GetParameters
                 Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/bclaw/*"
               - Effect: Allow
-                # Scoped to the claw's own CMK (created above as SsmKmsKey),
-                # NOT key/* — the deployer policy pins this via kms:ResourceAliases
-                # on alias/${ClawName}-ssm. WithDecryption is implied by
-                # GetParameters when the caller has kms:Decrypt.
+                # Scoped to the claw's own CMK (SsmKmsKey, above). The
+                # encryption context is pinned to the /bclaw/ namespace so
+                # the key can't decrypt params outside it; CallerAccount +
+                # ViaService bind the key to this account's SSM service.
                 Action: kms:Decrypt
                 Resource: !GetAtt SsmKmsKey.Arn
                 Condition:
                   StringEquals:
                     "kms:ViaService": !Sub "ssm.${AWS::Region}.amazonaws.com"
+                    "kms:CallerAccount": !Ref AWS::AccountId
+                  StringLike:
+                    "kms:EncryptionContext:PARAMETER_ARN": !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/bclaw/*"
 
   # ── IAM: task role (used by the container; needs ssmmessages for ECS Exec) ──
 
@@ -365,20 +371,18 @@ Resources:
                 Resource: "*"
         # SSM read access for the aws_ssm secret-source plugin
         # (hermes-aws-ssm-secret-source). It runs in the container process and
-        # calls GetParametersByPath at startup to resolve the /bclaw/ namespace
-        # into env vars. Mirrors the ExecutionRole's read-ssm-params grant (ECS
-        # uses that one to resolve CloudFormation secrets[] at container start;
-        # the running container uses this one). WithDecryption is implied when
-        # the caller has kms:Decrypt on the claw's CMK.
+        # calls GetParameters at startup to resolve the /bclaw/* SecureString
+        # params explicitly mapped in agent_home/config.yaml `env:` into env
+        # vars. Mirrors the ExecutionRole's read-ssm-params grant. WithDecryption
+        # is server-side, gated by kms:Decrypt below; the encryption context is
+        # pinned to the /bclaw/ namespace so the key can't decrypt params
+        # outside it.
         - PolicyName: read-ssm-params
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
               - Effect: Allow
-                Action:
-                  - ssm:GetParameters
-                  - ssm:GetParameter
-                  - ssm:GetParametersByPath
+                Action: ssm:GetParameters
                 Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/bclaw/*"
               - Effect: Allow
                 Action: kms:Decrypt
@@ -386,6 +390,9 @@ Resources:
                 Condition:
                   StringEquals:
                     "kms:ViaService": !Sub "ssm.${AWS::Region}.amazonaws.com"
+                    "kms:CallerAccount": !Ref AWS::AccountId
+                  StringLike:
+                    "kms:EncryptionContext:PARAMETER_ARN": !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/bclaw/*"
 
   # ── IAM: container-instance role + instance profile ───────────────────────
   # The EC2 container instance (ASG-managed) needs:

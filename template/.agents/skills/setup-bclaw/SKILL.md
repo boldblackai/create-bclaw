@@ -152,12 +152,14 @@ Use `ask_user_question` to collect:
    - **Z.AI (GLM)** — Zhipu/z.ai GLM models
 
    The provider choice determines which provider API-key SSM parameter the user
-   creates in Phase 3. The aws_ssm secret-source plugin resolves it (and every
-   other `/bclaw/*` secret) into the env at gateway startup, so there is no
-   per-provider stack parameter — adding or swapping a provider key later is
-   just an SSM write + task restart, no template edit or redeploy. The gateway
-   needs at least one provider key to run; create more than one if the user
-   wants (e.g. OpenRouter plus Anthropic) — every key present in SSM resolves.
+   creates in Phase 3. The aws_ssm secret-source plugin resolves it (and the
+   other `/bclaw/*` secrets mapped in `agent_home/config.yaml`'s `env:`) into
+   the env at gateway startup, so there is no per-provider stack parameter —
+   adding or swapping a provider key later is an SSM write (+ an `env:` entry
+   if it's a brand-new param name) + task restart, no template edit or
+   redeploy. The gateway needs at least one provider key to run; create more
+   than one if the user wants (e.g. OpenRouter plus Anthropic) — the provider
+   keys mapped in `env:` resolve if present in SSM (missing ones warn-skip).
 
    Provider → SSM key mapping:
 
@@ -471,10 +473,11 @@ For each parameter the user creates in the console, the settings are:
 
 **Gate: verify all required parameters exist before proceeding** (values not
 displayed) — the 4 Slack secrets plus the provider key (plus `GH_TOKEN_VAL` iff
-`ENABLE_GH=true`). Every parameter the plugin will resolve should exist before
-the gateway boots with the plugin configured (Phase 5); a missing one is
-non-fatal (the gateway boots without it) but the Slack tokens and the provider
-key are required for a working claw, so confirm they are present:
+`ENABLE_GH=true`). Every parameter mapped in `agent_home/config.yaml`'s `env:`
+should exist before the gateway boots with the plugin configured (Phase 5); a
+missing one is non-fatal (the plugin warns and skips it, the gateway boots
+without it) but the Slack tokens and the provider key are required for a
+working claw, so confirm they are present:
 
 ```bash
 PROVIDER_KEY=$(case "$INFER_PROVIDER" in

@@ -1,14 +1,25 @@
 # aws_ssm secret source for Hermes. Pushed into the live ~/.hermes/config.yaml
 # by the manage-bclaw skill's Merge-config mode (run once during setup); the
 # overlay excludes config.yaml on purpose. The aws_ssm plugin
-# (hermes-aws-ssm-secret-source, installed during setup) resolves the /bclaw/
-# namespace into env vars at the first gateway start, using the TaskRole's
-# read-ssm-params grant. Requires Hermes >= 1.9.3 (#64189).
+# (hermes-aws-ssm-secret-source, installed during setup) resolves the
+# explicitly-listed /bclaw/* SecureString params into env vars at the first
+# gateway start, using the TaskRole's read-ssm-params grant. The plugin is
+# mapped-only: only the params listed under `env:` are fetched, and only
+# SecureString params are accepted (missing or non-SecureString entries warn
+# and are skipped, non-fatal). The three inference-provider keys are all listed
+# so whichever one the operator drops into SSM resolves on restart; the others
+# warn-skip harmlessly. Requires Hermes >= 1.9.3 (#64189).
 secrets:
-  sources: [aws_ssm]        # ordered; bulk sources yield to mapped ones
+  sources: [aws_ssm]
   aws_ssm:
     enabled: true
-    path: /bclaw/           # the claw's SSM namespace
-    region: ""              # empty = botocore default chain (AWS_REGION / profile / task role)
-    recursive: true
     override_existing: true # rotate centrally without a .env edit
+    region: ""              # empty = botocore default chain (AWS_REGION / profile / task role)
+    env:
+      SLACK_BOT_TOKEN: /bclaw/SLACK_BOT_TOKEN
+      SLACK_APP_TOKEN: /bclaw/SLACK_APP_TOKEN
+      SLACK_ALLOWED_USERS: /bclaw/SLACK_ALLOWED_USERS
+      SLACK_HOME_CHANNEL: /bclaw/SLACK_HOME_CHANNEL
+      OPENROUTER_API_KEY: /bclaw/OPENROUTER_API_KEY
+      ANTHROPIC_API_KEY: /bclaw/ANTHROPIC_API_KEY
+      ZAI_API_KEY: /bclaw/ZAI_API_KEY
