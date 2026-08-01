@@ -5,6 +5,8 @@
     "MD013": false,
     // this repo uses dash-style lists throughout AGENTS.md and README.md
     "MD004": { "style": "dash" },
+    // CHANGELOG entries repeat "### Summary" and "### Changes" per version
+    "MD024": { "siblings_only": true },
   },
   "ignores": ["node_modules/", "dist/", "template/"],
 }
