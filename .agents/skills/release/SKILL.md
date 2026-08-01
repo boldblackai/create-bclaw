@@ -5,24 +5,27 @@ description: Automate releasing the @boldblackai/create-bclaw npm package. Use t
 
 # Release Skill for `@boldblackai/create-bclaw`
 
-Automates the full release pipeline: pre-flight checks → version bump → CHANGELOG → verify → build → publish → tag → GitHub release.
+Automates the full release pipeline: pre-flight checks → version bump → CHANGELOG → verify → build → open release PR → (maintainer merges) → CI auto-tags, publishes to npm (OIDC), creates GitHub release.
 
-> **Scope.** This repo is the `create-bclaw` generator (npm CLI + bundled `template/`). It has no Dockerfiles and no deploy guides, so this skill does **not** do image-tag bumps, Dockerfile dependency diffs, or upstream release-note aggregation — those belong to the `harness` release skill. The `template/` snapshot ships inside the published package, so the golden test (`pnpm test`) is the integrity gate for everything a consumer receives.
+> **npm publishing is fully automated via [trusted publishing](https://docs.npmjs.com/trusted-publishers/) (OIDC).** The agent never touches npm credentials, pushes tags, or creates GitHub releases. It only opens a release PR; merging that PR triggers `tag-on-merge.yml`, which handles everything: tag, npm publish (with provenance attestations), and GitHub release — all in one workflow.
+>
+> **Release model:** The trust boundary is "can merge a PR to main" = "can release." The agent has zero upstream write access — it opens the PR from its fork (BoldBlackBot); the maintainer's squash-merge triggers everything.
+>
+> **Prerequisite (one-time, manual on npmjs.com):** Configure the trusted publisher for `@boldblackai/create-bclaw` under Settings → Trusted Publisher → GitHub Actions: org=`boldblackai`, repo=`create-bclaw`, workflow filename=`tag-on-merge.yml`. Then under Settings → Publishing access, select "Require two-factor authentication and disallow tokens" (recommended) — OIDC publishes are unaffected by this setting.
 
 ## Step 1: Pre-flight checks (abort on failure)
 
-**Main bookmark is up to date** — Verify that the local `main` bookmark and `main@origin` point to the same commit. In jj, remote bookmarks use `<bookmark>@<remote>` syntax (not `origin/<bookmark>`). Run:
+**Ensure working from latest main** — Fetch latest and verify local main matches remote:
 
 ```bash
-jj log -r "main" --no-graph -T 'commit_id ++ "\n"'
-jj log -r "main@origin" --no-graph -T 'commit_id ++ "\n"'
+git fetch origin main
+git checkout main
+git pull --ff-only origin main
 ```
 
-If they differ, there are unpushed commits on `main`. Inform the user:
+If `git pull --ff-only` fails (local main has diverged), inform the user and abort.
 
-> "Aborting: local main is ahead of main@origin. Push your commits first with `jj git push`."
-
-**Clean working state** — Run `jj status`. If there are uncommitted changes beyond what you're about to create (`package.json` + `CHANGELOG.md`), warn the user and ask whether to proceed.
+**Clean working state** — Run `git status`. If there are uncommitted changes beyond what you're about to create (`package.json` + `CHANGELOG.md`), warn the user and ask whether to proceed.
 
 **README is up to date** — Read `README.md` and the commits since the last tag (collected in Step 3). Check whether any commit introduces new CLI flags/options (`--region`, `--force`, etc.), changes the name validation rules, alters generator behavior, or changes what the generated claw contains — and isn't already reflected in `README.md`. If gaps are found, list them and ask the user to update `README.md` before continuing:
 
@@ -81,7 +84,7 @@ Based on the commits collected, write a 1–3 sentence prose summary of what cha
 
 ## Step 5: Bump version in package.json
 
-Edit the `version` field directly in `package.json`. Do not use `npm version` — it creates git commits automatically and would interfere with the jj workflow.
+Edit the `version` field directly in `package.json`. Do not use `npm version` — it creates git commits and tags automatically and would interfere with the release workflow.
 
 ## Step 6: Verify locally (mirror CI)
 
@@ -104,78 +107,81 @@ pnpm build   # tsc → dist/
 
 Stop if this fails.
 
-## Step 8: Commit and push the release
+## Step 8: Create release branch and commit
 
-In jj, file changes are automatically snapshotted in the working-copy commit. Describe it and move to a new empty commit:
+Create a release branch from main and commit all release changes:
 
 ```bash
-jj describe -m "release v<version>"
-jj new
+git checkout -b release/v<version>
+git add package.json CHANGELOG.md
+git commit -m "release v<version>"
 ```
 
-Advance the main bookmark to the release commit, then push:
+## Step 9: Push branch and open release PR
+
+Ensure a fork remote exists (for the agent's bot account):
 
 ```bash
-jj bookmark set main -r @-
-jj git push --bookmark main
+git remote add fork https://github.com/BoldBlackBot/create-bclaw.git 2>/dev/null || true
 ```
 
-## Step 9: Publish to npm
-
-`npm publish` requires an OTP and cannot be automated. The package is scoped public (`@boldblackai/create-bclaw`, `publishConfig.access: public`). Tell the user:
-
-> "Please run `npm publish` (with `--otp=<code>` if prompted for 2FA). Let me know when it succeeds and I'll continue."
-
-Wait for the user to confirm success before proceeding to Step 10.
-
-## Step 10: Create and push the tag
-
-Create the tag locally pointing to the release commit (one behind `@`, the current empty working copy):
+Push the release branch:
 
 ```bash
-jj tag set v<version> -r @-
+git push -u fork release/v<version>
 ```
 
-Push it to the remote (jj doesn't support pushing tags directly; use git):
+Open the PR — the squash merge commit message (`release v<version>`) is the sentinel that gates `tag-on-merge.yml`:
 
 ```bash
-git push --tags
-```
-
-## Step 11: Create GitHub release
-
-Extract the changelog section for this version — everything from `## [<version>]` down to (but not including) the next `## [` entry.
-
-```bash
-gh release create v<version> \
+gh pr create \
   --repo boldblackai/create-bclaw \
-  --title "v<version>" \
-  --notes "<changelog-entry>"
+  --head BoldBlackBot:release/v<version> \
+  --base main \
+  --title "release v<version>" \
+  --body "Release v<version>.
+
+See CHANGELOG.md for details.
+
+Merging this PR will automatically:
+1. Push the \`v<version>\` tag
+2. Publish to npm via OIDC (with provenance)
+3. Create the GitHub release" \
 ```
 
-## Step 12: Post-flight — verify CI succeeded
+## Step 10: Wait for maintainer to merge the PR
 
-This repo's CI (`.github/workflows/ci.yml`) triggers on pushes to `main`; there is no separate release workflow. After pushing the release commit to `main`, poll the most recent run on `main`:
+**STOP HERE.** The skill cannot proceed until the PR is merged. Tell the user:
+
+> "Release PR #N is up: *URL*. Review and merge it, then tell me to continue."
+
+Do not proceed to Step 11 until the user confirms the PR has been merged.
+
+## Step 11: Monitor the automated release pipeline (read-only)
+
+After the PR is squash-merged, the merge commit (`release v<version> (#N)`) triggers `tag-on-merge.yml` on push to main. It pushes the `v<version>` tag, publishes to npm via OIDC, and creates the GitHub release — all in one workflow. All of this runs as CI — the agent only monitors, never acts.
+
+> **The PR must be squash-merged** so the commit message starts with `release v`. If the merge method is changed, the sentinel won't match and the pipeline won't fire.
+
+### 11a: Verify tag-on-merge ran (tag + npm + release)
 
 ```bash
-gh run list --repo boldblackai/create-bclaw --branch main --limit 1
+gh run list --repo boldblackai/create-bclaw --workflow tag-on-merge.yml --limit 1
 ```
 
-Use the run ID to watch for completion:
+Confirm the workflow succeeded. If it failed, check logs:
 
 ```bash
-gh run view <run-id> --repo boldblackai/create-bclaw
+gh run view <run-id> --repo boldblackai/create-bclaw --log-failed
 ```
 
-Check that **all jobs** show `✓` (success): Lint, Format check, actionlint, Typecheck, Golden test. If any job failed, run:
+Once the workflow succeeds, verify the package landed on npm **with provenance attestations**:
 
 ```bash
-gh run rerun <run-id> --failed --repo boldblackai/create-bclaw
+npm view @boldblackai/create-bclaw@<version> dist --json
 ```
 
-Then wait for it to complete and verify again before reporting success.
-
-Only report the release as complete once the entire workflow is green.
+Confirm the output includes an `attestations` field (not just `signatures`). If `attestations` is missing, the publish did not generate provenance — investigate before continuing.
 
 ## Final report
 
@@ -183,5 +189,6 @@ Tell the user:
 
 - Version released
 - The CHANGELOG entry added
-- GitHub release URL (from `gh release create` stdout)
-- CI status (all jobs green)
+- Release PR URL (merged)
+- npm publish status (workflow green, provenance attestations confirmed)
+- GitHub release URL
