@@ -586,7 +586,7 @@ base64 lines (dropping the `Session Manager` / `Starting session` lines).
 ### Step 2: Run the merge
 
 ```bash
-uv run --no-project --with 'ruamel.yaml' python3 \
+uv run --no-project --with 'ruamel.yaml==0.19.1' python3 \
   .agents/skills/manage-bclaw/merge_config.py \
   --local /workspace/agent_home/config.yaml \
   --remote /tmp/claw_config.current \
