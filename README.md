@@ -87,7 +87,9 @@ pnpm test             # tsc && node --test (golden test)
 
 ### Publishing
 
-Run `npm publish`
+Releases are automated via npm OIDC trusted publishing. Open a release PR
+titled `release v<version>`; merging it triggers `tag-on-merge.yml` which
+tags, publishes to npm (with provenance), and creates the GitHub release.
 
 ## License
 

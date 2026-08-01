@@ -1,5 +1,30 @@
 # Changelog
 
+## [1.0.2] - 2026-08-01
+
+### Summary
+
+Secrets now come natively from AWS SSM. Generated claws bundle the [`hermes-aws-ssm-secret-source`](https://github.com/boldblackai/hermes-aws-ssm-secret-source) plugin, which resolves SecureString parameters under `/<name>/` into environment variables at gateway start using the ECS TaskRole — no `.env` file to manage, and rotating a value in SSM takes effect on the next restart with no redeploy. Configuration is mapped-only: only the parameters listed in `config.yaml` are fetched, and only `SecureString` types are accepted.
+
+### Changes
+
+- f7f697e feat: add trusted publishing release pipeline (#29)
+- a877f26 Tighten aws_ssm IAM and migrate config to mapped-only plugin
+- 20ed7cd Port back aws_ssm secret-source plugin design
+- facbde4 Document corkboard integration-journal workflow in AGENTS.md
+- f06ed75 Add RFC: on-boot materialization of _-prefixed SSM secrets into $HERMES_HOME/.env
+- 80ed201 Merge pull request #20 from boldblackai/feat/mise-env-replace-direnv
+- e3f50ff docs: redact AWS identifiers in RFCs (#23)
+- 77df9c3 docs: require AWS ID redaction in RFCs, PRs, and comments (#22)
+- 87bd2d2 docs: discard integration journal after port-back (#21)
+- 41e96d5 rfc(mise-env): mark Implemented; record integration cycle
+- 5b5e0d5 docs: note /alt/integration uses mise for aws access
+- 96a97fe docs(template/skills): switch activation snippet to mise-only
+- 4df96f0 docs(template): switch activation snippet to mise-only
+- 9bfb184 feat(template): load .env via mise, drop direnv
+- 6fbcb06 Merge pull request #19 from boldblackai/rfc/mise-env-replace-direnv
+- 3a8504d rfc: replace direnv with mise native .env loading
+
 ## [1.0.1] - 2026-07-16
 
 ### Summary
